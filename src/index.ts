@@ -5,13 +5,17 @@ import { createRssAdapter } from './sources';
 import { createJudge } from './llm';
 import { createWebhookNotifier } from './notifications';
 import { runPipeline } from './engine';
+import { readProfile, mutateProfile, undoProfile, listProfileHistory, ProfileError } from './profiles';
+import { PROFILE_TOOLS, parseToolCall } from './profile-tools';
+import { planSource } from './interest-policy';
+import type { SourceRow } from './store';
 const json=(data:unknown,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
-async function authorized(request:Request,env:Env):Promise<boolean> {
- if(!env.ADMIN_TOKEN || env.ADMIN_TOKEN.length<32) return false;
+async function authorized(request:Request,token:string|undefined):Promise<boolean> {
+ if(!token || token.length<32) return false;
  const header=request.headers.get('Authorization')??'';
  if(!header.startsWith('Bearer ') || header.length>1024) return false;
  const hash=async(s:string)=>new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)));
- const [a,b]=await Promise.all([hash(header.slice(7)),hash(env.ADMIN_TOKEN)]);
+ const [a,b]=await Promise.all([hash(header.slice(7)),hash(token)]);
  let diff=0; for(let i=0;i<a.length;i++) diff|=a[i]^b[i]; return diff===0;
 }
 async function readJson(request:Request):Promise<unknown> {
@@ -29,9 +33,39 @@ export function dependencies(env:Env) {
 export async function handleRequest(request:Request,env:Env):Promise<Response> {
  const url=new URL(request.url);
  if(url.pathname==='/health' && request.method==='GET') return json({service:'get-news',version:'0.1.0'});
- if(!await authorized(request,env)) return json({error:'unauthorized'},401);
+ const admin=await authorized(request,env.ADMIN_TOKEN);
+ const agent=!admin && !!env.PROFILE_AGENT_USER_ID && await authorized(request,env.PROFILE_AGENT_TOKEN);
+ if(!admin && !agent) return json({error:'unauthorized'},401);
+ const profileRoute=url.pathname.match(/^\/api\/profiles\/([A-Za-z0-9_-]{1,64})(?:\/(history|changes|undo|tools|collection-plan))?$/);
+ if(agent && (!profileRoute || profileRoute[1]!==env.PROFILE_AGENT_USER_ID)) return json({error:'forbidden'},403);
  const store=new Store(env.DB);
  try {
+  if(profileRoute) {
+   const [,userId,action]=profileRoute;
+   const profile=await readProfile(env.DB,userId);
+   if(!profile) return json({error:'profile_not_found'},404);
+   const actor=admin?{kind:'admin' as const,id:'admin'}:{kind:'agent' as const,id:'profile-agent',userId};
+   const preview=async()=> (await store.all<SourceRow>('SELECT * FROM sources ORDER BY id')).map(s=>({id:s.id,name:s.name,...planSource({...s,tags:JSON.parse(s.topics_json)},[profile])}));
+   if(request.method==='GET') {
+    if(!action) return json(profile);
+    if(action==='history') return json(await listProfileHistory(env.DB,userId));
+    if(action==='tools') return json({tools:PROFILE_TOOLS});
+    if(action==='collection-plan') return json({scope:'this_user',sources:await preview()});
+   }
+   if(request.method==='POST' && ['changes','undo','tools'].includes(action)) {
+    let body:unknown;
+    try {body=await readJson(request);} catch {return json({error:'invalid_json_body'},400);}
+    if(action==='changes') return json(await mutateProfile(env.DB,userId,body,actor));
+    if(action==='undo') return json(await undoProfile(env.DB,userId,body,actor));
+    let call;try {call=parseToolCall(body);}catch{return json({error:'invalid_tool_call'},400);}
+    if(call.name==='get_profile') return json(profile);
+    if(call.name==='list_profile_changes') return json(await listProfileHistory(env.DB,userId));
+    if(call.name==='preview_collection_plan') return json({scope:'this_user',sources:await preview()});
+    if(call.name==='update_profile') return json(await mutateProfile(env.DB,userId,call.arguments,actor));
+    return json(await undoProfile(env.DB,userId,call.arguments,actor));
+   }
+   return json({error:'not_found'},404);
+  }
   if(request.method==='POST' && url.pathname==='/api/run') return json(await runPipeline(dependencies(env)));
   if(request.method==='GET' && url.pathname==='/api/status') return json({llmEnabled:env.LLM_ENABLED==='true',pushEnabled:env.PUSH_ENABLED==='true',limits:LIMITS,runs:await store.all('SELECT * FROM runs ORDER BY started_at DESC LIMIT 20'),jobs:await store.all('SELECT status,count(*) AS count FROM judgments GROUP BY status'),outbox:await store.all('SELECT status,count(*) AS count FROM outbox GROUP BY status')});
   if(request.method==='GET' && url.pathname==='/api/sources') return json(await store.all('SELECT * FROM sources ORDER BY id'));
@@ -47,7 +81,8 @@ export async function handleRequest(request:Request,env:Env):Promise<Response> {
    const profile=parseProfile(await readJson(request));
    const existing=await store.first('SELECT id FROM users WHERE id=?',profile.id);
    const count=await store.first<{count:number}>('SELECT count(*) AS count FROM users');
-   if(!existing && (count?.count??0)>=LIMITS.users) return json({error:'user_limit'},409);
+   if(existing) return json({error:'use_versioned_profile_changes'},409);
+   if((count?.count??0)>=LIMITS.users) return json({error:'user_limit'},409);
    await store.saveProfile(profile); return json({ok:true,id:profile.id});
   }
   if(request.method==='GET' && url.pathname==='/api/articles') return json(await store.all('SELECT * FROM articles ORDER BY discovered_at DESC LIMIT 100'));
@@ -55,6 +90,7 @@ export async function handleRequest(request:Request,env:Env):Promise<Response> {
   if(request.method==='GET' && url.pathname==='/api/outbox') return json(await store.all('SELECT * FROM outbox ORDER BY created_at DESC LIMIT 100'));
   return json({error:'not_found'},404);
  } catch(error) {
+  if(error instanceof ProfileError) return json({error:error.code},error.status);
   // Never echo provider, feed, SQL or credential-bearing errors into HTTP/log responses.
   return json({error:request.method==='PUT'?'invalid_configuration':'operation_failed'},request.method==='PUT'?400:503);
  }
