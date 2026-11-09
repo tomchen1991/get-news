@@ -1,0 +1,11 @@
+# Copy to .dev.vars (gitignored). Do not commit real values.
+ADMIN_TOKEN=replace-with-a-random-token-of-at-least-32-characters
+# Enable only after choosing the provider, model and spending budget.
+LLM_ENABLED=false
+LLM_BASE_URL=https://api.your-provider.com/v1
+LLM_MODEL=replace-with-an-explicit-model-id
+LLM_API_KEY=
+# Generic JSON webhook, not an assumed Telegram/WeCom format.
+PUSH_ENABLED=false
+PUSH_WEBHOOK_URL=
+PUSH_WEBHOOK_TOKEN=
