@@ -1,0 +1,1 @@
+export { createRssAdapter } from './rss';
