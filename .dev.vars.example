@@ -9,3 +9,7 @@ LLM_API_KEY=
 PUSH_ENABLED=false
 PUSH_WEBHOOK_URL=
 PUSH_WEBHOOK_TOKEN=
+# Optional conversational-agent credential: restricted to this user's profile APIs.
+# Never give ADMIN_TOKEN to the news judge or conversational agent.
+PROFILE_AGENT_TOKEN=
+PROFILE_AGENT_USER_ID=owner

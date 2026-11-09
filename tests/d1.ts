@@ -1,9 +1,11 @@
+import { URL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 /** Exercises production SQL against SQLite, no Cloudflare account needed. */
 export function createDatabase():{db:D1Database; close:()=>void} {
  const sqlite=new DatabaseSync(':memory:');
- sqlite.exec(readFileSync(new URL('../migrations/0001_initial.sql',import.meta.url).pathname,'utf8'));
+ const directory=new URL('../migrations/',import.meta.url);
+ for(const file of readdirSync(directory).filter(f=>f.endsWith('.sql')).sort()) sqlite.exec(readFileSync(new URL(file,directory),'utf8'));
  class Statement {
   constructor(readonly sql:string,readonly params:unknown[]=[]){}
   bind(...params:unknown[]){return new Statement(this.sql,params);}

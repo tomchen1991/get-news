@@ -145,3 +145,71 @@ Workers 中无法可靠预先解析 DNS 并证明最终目标公网，因此**�
 5. 分别启用模型与推送，在实际渠道验证消息、重复抑制和时区；勿只看 dry-run 构建就当作上线成功。
 
 仓库 CI 只做安装、类型检查、离线测试和打包，不自动部署，不持有生产密钥。
+
+## 用户画像与 Agent 工具
+
+画像独立保存在 D1：原有 `interests/excludedTopics` 保留，新增版本号 `revision` 和 `preferences`。明确偏好包括主题、来源的 `prefer / less / exclude / digest`；推断兴趣单独记录为 `inferredTopics`（权重 -0.25～0.25，仅给判断模型作为弱提示，不覆盖明确规则）。`delivery` 为 `alert / digest / paused`，另有冷却间隔、每日上限、静默时段。
+
+**更新前先运行新增迁移**（先在本地验证并备份远端数据库，再自行部署）：
+
+```bash
+npx wrangler d1 migrations apply get-news --local
+# 确认目标 Cloudflare 账号和数据库后，由部署者运行：
+npx wrangler d1 migrations apply get-news --remote
+```
+
+0002 为已有用户补充默认画像和只追加的变更历史；0003 增加可信来源主题标签和冷却时间索引/字段。旧画像默认行为不变。所有迁移均增量，不清空新闻或用户。
+
+### 接入你的对话 Agent
+
+新闻判断 LLM **仍然没有工具**，不会根据新闻正文修改用户画像。对话 Agent 才能获得以下独立 API。为它配置长度至少 32 的独立 secret `PROFILE_AGENT_TOKEN`，以及普通变量 `PROFILE_AGENT_USER_ID=owner`。这个凭据只能访问绑定用户的画像，不能操作来源、其他用户、运行任务或查看全站记录。管理员 token 仍可维护所有用户。
+
+```bash
+npx wrangler secret put PROFILE_AGENT_TOKEN
+```
+
+在 Cloudflare 的 Worker 设置或 `wrangler.jsonc` 的 `vars` 中填写 `PROFILE_AGENT_USER_ID`。不要把管理员密钥、模型密钥、推送密钥交给对话模型，也不要在提示词中直接嵌入任何凭据；由工具执行器注入 Authorization header。
+
+| API | 用途 |
+| --- | --- |
+| `GET /api/profiles/owner` | 当前完整画像与版本 |
+| `GET /api/profiles/owner/history` | 最近 50 条变更，包含修改前后、原因、反馈原文和操作者 |
+| `GET /api/profiles/owner/tools` | 可注册到 Agent 的 function tool 定义 |
+| `POST /api/profiles/owner/tools` | 执行 `{ "name": "get_profile", "arguments": {} }` 等工具调用 |
+| `POST /api/profiles/owner/changes` | 提交结构化修改 |
+| `POST /api/profiles/owner/undo` | 撤销最近一次变更 |
+| `GET /api/profiles/owner/collection-plan` | 预览该用户对已注册来源的采集需求 |
+
+所有上述 API 都要求 `Authorization: Bearer <token>`；POST 要求 JSON、最大 16 KiB。提供 `get_profile / update_profile / list_profile_changes / undo_profile_change / preview_collection_plan` 五个工具。接口已经可用，但本仓不内置聊天机器人或多轮 Agent；把定义注册到你的 Agent，再由执行器转发工具参数即可。
+
+例：用户明确要求少看加密货币新闻、每小时最多一次提醒：
+
+```json
+{
+  "expectedRevision": 0,
+  "changeId": "feedback-20261109-001",
+  "reason": "用户明确调整内容与提醒频率",
+  "evidence": "加密货币的少推一点，提醒至少隔一小时",
+  "operations": [
+    { "op": "set_topic", "topic": "加密货币", "mode": "less" },
+    { "op": "set_settings", "settings": { "cooldownMinutes": 60 } }
+  ]
+}
+```
+
+- `expectedRevision` 必须与读取版本一致；冲突返回 409，重新读取后重新决定，禁止盲目覆盖。
+- `changeId` 是客户端稳定唯一 ID；相同请求重试不会重复更新，不同参数复用 ID 返回 409。
+- `reason/evidence` 必填。审计是模型/调用者提供的解释，不代表系统能证明用户确实说过这句话；可信对话层应只提交用户授权的变化。不要写入凭据或无关敏感信息。
+- 单次点踩不自动永久屏蔽领域；无回复不作为负反馈。减少推荐用 `less`，明确“不再看”才用 `exclude`。模型推断只使用独立的弱兴趣字段。服务端不会从点击或沉默自动学习。
+- 撤销请求将 `operations` 替换为 `targetChangeId`。仅允许撤销当前最新变更，并产生新版本、保留历史，不会擦除记录或重新发送消息。
+- 旧 `PUT /api/users` 现在仅创建用户；对已有用户返回 409，请迁移更新调用至版本化接口。
+
+### 采集与推送策略
+
+来源仍由管理员通过 `PUT /api/sources` 注册，不允许模型提交任意抓取 URL。来源可增加 `topics: ["AI", "开发工具"]` 标签。明确偏好影响已注册可信来源的 20/60/180 分钟采集计划；多个用户共享同一来源时取最快需求，故个人预览不等于全局最终抓取间隔。实际检查仍由 20 分钟 Cron 驱动，失败来源保留退避策略。
+
+判断模型接收画像；明确排除/日报/暂停规则还会在服务端再检查。待发候选优先考虑分数与明确偏好，遵守每日预算、静默时间与冷却间隔，而不是见到一条就抢占全部名额。这里只在有限待发候选内比较，不引入额外 LLM 排名费用。
+
+画像每次修改都会在同一事务抑制旧的 pending 消息；发送预订还会核验当前版本，防止旧偏好发送。已预订、正在发送的外部请求不能撤回，已发送/结果不确定的记录不会重放。历史新闻不会因为撤销或改偏好自动补发。
+
+**本版边界：** `digest` 只保留日报候选、不推即时快讯；日报定时汇总与发送尚未实现。没有向量库、兴趣自动衰减、点击反馈采集、自动扩充来源或聊天前端。先让画像更新、审计、来源计划与推荐闭环可用，不额外增加模型调用成本。

@@ -22,12 +22,12 @@ export function parseProfile(value: unknown): UserProfile {
  if(typeof v.enabled !== 'boolean') throw new Error('invalid_enabled');
  return {id:identifier(v.id),name:v.name.trim(),interests,excludedTopics:strings(v.excludedTopics,20,300),minScore:integer(v.minScore,0,100),minConfidence:v.minConfidence,dailyLimit:integer(v.dailyLimit,0,20),timezone:v.timezone,quietStart:integer(v.quietStart,0,23),quietEnd:integer(v.quietEnd,0,23),enabled:v.enabled};
 }
-export interface SourceConfig { id:string; name:string; kind:'rss'; url:string; enabled:boolean }
+export interface SourceConfig { id:string; name:string; kind:'rss'; url:string; enabled:boolean; topics?:string[] }
 export function parseSource(value:unknown):SourceConfig {
  if(!value || typeof value !== 'object') throw new Error('invalid_source');
  const v = value as Record<string,unknown>;
  if(v.kind !== 'rss' || typeof v.name !== 'string' || !v.name.trim() || v.name.length > 80 || typeof v.enabled !== 'boolean' || typeof v.url !== 'string' || v.url.length > 2000) throw new Error('invalid_source');
- return {id:identifier(v.id),name:v.name.trim(),kind:'rss',url:assertPublicHttpsUrl(v.url).toString(),enabled:v.enabled};
+ return {id:identifier(v.id),name:v.name.trim(),kind:'rss',url:assertPublicHttpsUrl(v.url).toString(),enabled:v.enabled,topics:v.topics===undefined?[]:strings(v.topics,20,100)};
 }
 export function localTime(timestamp:number, timezone:string):{day:string;hour:number} {
  const parts = new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',hourCycle:'h23'}).formatToParts(timestamp);
