@@ -2,13 +2,14 @@ import type { Decision, Judge, SourceAdapter, UserProfile } from './types';
 import { LIMITS, articleId, isEligible, isQuiet, localTime } from './config';
 import { Store, type SourceRow } from './store';
 import type { Notifier } from './notifications';
+import { runSearch, type SearchConfig } from './search/runner';
 import { readProfile } from './profiles';
 import { alertPolicy, candidatePriority, planSource, sourceAllowed } from './interest-policy';
-export interface Dependencies { store:Store; sources:Map<string,SourceAdapter>; judge?:Judge; notifier?:Notifier; now?:()=>number }
+export interface Dependencies { store:Store; sources:Map<string,SourceAdapter>; judge?:Judge; notifier?:Notifier; now?:()=>number; search?:SearchConfig; searchConfigurationError?:boolean }
 export interface RunStats { state:'completed'|'busy'; sources:number; items:number; decisions:number; accepted:number; deliveryAttempts:number; delivered:number; errors:number }
 export async function runPipeline(deps:Dependencies):Promise<RunStats> {
  const now=deps.now??Date.now, store=deps.store, start=now(), token=crypto.randomUUID();
- const stats:RunStats={state:'completed',sources:0,items:0,decisions:0,accepted:0,deliveryAttempts:0,delivered:0,errors:0};
+ const stats:RunStats={state:'completed',sources:0,items:0,decisions:0,accepted:0,deliveryAttempts:0,delivered:0,errors:deps.searchConfigurationError?1:0};
  if(!await store.lock(token,start,LIMITS.leaseMs)) return {...stats,state:'busy'};
  try {
   await store.run("INSERT INTO runs(id,started_at,status) VALUES(?,?,'running')",token,start);
@@ -19,7 +20,7 @@ export async function runPipeline(deps:Dependencies):Promise<RunStats> {
   const active=async()=>{if(now()-start>LIMITS.runMs || !await store.run("UPDATE locks SET until_at=? WHERE id='poll' AND token=? AND until_at>?",now()+LIMITS.leaseMs,token,now())) throw new Error('lease_lost');};
   await store.run("UPDATE judgments SET status='skipped',error_code='expired',updated_at=? WHERE (status='pending' OR (status='processing' AND lease_until<=?)) AND article_id IN (SELECT id FROM articles WHERE discovered_at<? OR (published_at IS NOT NULL AND julianday(published_at)<julianday(?)))",now(),now(),now()-LIMITS.ageMs,new Date(now()-LIMITS.ageMs).toISOString());
   await store.run("UPDATE outbox SET status='suppressed',error_code='expired' WHERE status='pending' AND judgment_id IN (SELECT j.id FROM judgments j JOIN articles a ON j.article_id=a.id WHERE a.discovered_at<? OR (a.published_at IS NOT NULL AND julianday(a.published_at)<julianday(?)))",now()-LIMITS.ageMs,new Date(now()-LIMITS.ageMs).toISOString());
-  const sources=await store.all<SourceRow>('SELECT * FROM sources WHERE enabled=1 ORDER BY next_poll_at,id LIMIT 20');
+  const sources=await store.all<SourceRow>("SELECT * FROM sources WHERE enabled=1 AND acquisition='rss' ORDER BY next_poll_at,id LIMIT 20");
   let sourceAttempts=0;
   for(const source of sources) {
    if(sourceAttempts>=LIMITS.sourcesPerRun) break;
@@ -54,6 +55,10 @@ export async function runPipeline(deps:Dependencies):Promise<RunStats> {
     stats.errors++;
     await store.run('UPDATE sources SET last_checked_at=?,next_poll_at=?,failures=failures+1,last_error=? WHERE id=?',now(),now()+Math.min(6*3600000,interval*2**Math.min(source.failures,4)),'source_fetch_failed',source.id);
    }
+  }
+  if(deps.search) {
+   await active();
+   try { stats.items+=await runSearch(store,deps.search,profiles,start); } catch { stats.errors++; }
   }
   if(deps.judge) for(const job of await store.jobs(now(),LIMITS.decisionsPerRun)) {
    if(now()-start>LIMITS.runMs) break;

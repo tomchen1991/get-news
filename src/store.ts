@@ -31,6 +31,9 @@ export class Store {
  }
  async ingest(id:string,item:NewsItem,sourceId:string,eligible:boolean,users:UserProfile[],now:number):Promise<void> {
   const statements=[this.db.prepare('INSERT OR IGNORE INTO articles(id,source_id,external_id,url,title,summary,published_at,discovered_at,eligible) VALUES(?,?,?,?,?,?,?,?,?)').bind(id,sourceId,item.externalId,item.url,item.title,item.summary,item.publishedAt,now,+eligible)];
+  // Discovery-only search must not poison a later authoritative dated RSS item.
+  // Do not promote undated RSS or modify any existing RSS-owned article.
+  if(eligible && item.publishedAt) statements.push(this.db.prepare(`UPDATE articles SET source_id=?,external_id=?,title=?,summary=?,published_at=?,discovered_at=?,eligible=1 WHERE id=? AND eligible=0 AND source_id IN (SELECT id FROM sources WHERE acquisition='search') AND EXISTS(SELECT 1 FROM sources WHERE id=? AND acquisition='rss')`).bind(sourceId,item.externalId,item.title,item.summary,item.publishedAt,now,id,sourceId));
   if(eligible) for(const user of users.filter(p=>sourceAllowed(p,sourceId))) {
    statements.push(this.db.prepare(`INSERT OR IGNORE INTO judgments(id,article_id,user_id,created_at,updated_at) SELECT u.id || ':' || a.id,a.id,u.id,?,? FROM articles a JOIN users u ON u.id=? AND u.enabled=1 WHERE a.id=? AND a.eligible=1 AND a.discovered_at>=?`).bind(now,now,user.id,id,now-86400000));
   }

@@ -13,3 +13,16 @@ PUSH_WEBHOOK_TOKEN=
 # Never give ADMIN_TOKEN to the news judge or conversational agent.
 PROFILE_AGENT_TOKEN=
 PROFILE_AGENT_USER_ID=owner
+# Search is opt-in; enabling transmits explicit interest/topic labels to chosen provider.
+SEARCH_ENABLED=false
+SEARCH_PROVIDER=tavily
+SEARCH_TIMEZONE=Asia/Shanghai
+TAVILY_API_KEY=
+TAVILY_DAILY_CREDITS=29
+TAVILY_MONTHLY_CREDITS=900
+# Alternative (not invoked alongside Tavily): paid CF Ceramic Web Search.
+CF_ACCOUNT_ID=
+CF_SEARCH_API_TOKEN=
+CF_SEARCH_GATEWAY_ID=
+CF_SEARCH_DAILY_REQUESTS=29
+CF_SEARCH_MONTHLY_REQUESTS=900

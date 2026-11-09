@@ -3,7 +3,7 @@
  "name":"get-news",
  "main":"src/index.ts",
  "compatibility_date":"2026-11-01",
- "triggers":{"crons":["*/20 * * * *"]},
- "vars":{"LLM_ENABLED":"false","PUSH_ENABLED":"false"},
+ "triggers":{"crons":["*/10 * * * *"]},
+ "vars":{"SEARCH_ENABLED":"false","SEARCH_PROVIDER":"tavily","SEARCH_TIMEZONE":"Asia/Shanghai","TAVILY_DAILY_CREDITS":"29","TAVILY_MONTHLY_CREDITS":"900","CF_SEARCH_DAILY_REQUESTS":"29","CF_SEARCH_MONTHLY_REQUESTS":"900","LLM_ENABLED":"false","PUSH_ENABLED":"false"},
  "d1_databases":[{"binding":"DB","database_name":"get-news","database_id":"00000000-0000-0000-0000-000000000000","migrations_dir":"migrations"}]
 }
