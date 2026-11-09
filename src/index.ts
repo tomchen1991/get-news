@@ -1,3 +1,5 @@
+import { searchConfig } from './search/config';
+import { buildSearchPlans } from './search/policy';
 import type { Env } from './types';
 import { LIMITS, parseProfile, parseSource } from './config';
 import { Store } from './store';
@@ -28,7 +30,9 @@ async function readJson(request:Request):Promise<unknown> {
 export function dependencies(env:Env) {
  const judge=env.LLM_ENABLED==='true'?createJudge({baseUrl:env.LLM_BASE_URL??'',apiKey:env.LLM_API_KEY??'',model:env.LLM_MODEL??''}):undefined;
  const notifier=env.PUSH_ENABLED==='true'?createWebhookNotifier(env.PUSH_WEBHOOK_URL??'',env.PUSH_WEBHOOK_TOKEN??''):undefined;
- return {store:new Store(env.DB),sources:new Map([['rss',createRssAdapter()]]),judge,notifier};
+ let search,searchConfigurationError=false;
+ try {search=searchConfig(env);} catch {searchConfigurationError=true;}
+ return {store:new Store(env.DB),sources:new Map([['rss',createRssAdapter()]]),judge,notifier,search,searchConfigurationError};
 }
 export async function handleRequest(request:Request,env:Env):Promise<Response> {
  const url=new URL(request.url);
@@ -40,17 +44,19 @@ export async function handleRequest(request:Request,env:Env):Promise<Response> {
  if(agent && (!profileRoute || profileRoute[1]!==env.PROFILE_AGENT_USER_ID)) return json({error:'forbidden'},403);
  const store=new Store(env.DB);
  try {
+  if(admin && url.pathname==='/api/search' && request.method==='GET') return json({enabled:env.SEARCH_ENABLED==='true',provider:env.SEARCH_PROVIDER??'tavily',timezone:env.SEARCH_TIMEZONE??'Asia/Shanghai',plans:buildSearchPlans(await store.profiles()),attempts:await store.all('SELECT * FROM search_attempts ORDER BY started_at DESC LIMIT 100'),state:await store.all('SELECT * FROM search_provider_state')});
+  if(admin && url.pathname==='/api/search/resume' && request.method==='POST') { await store.run('DELETE FROM search_provider_state'); return json({resumed:true}); }
   if(profileRoute) {
    const [,userId,action]=profileRoute;
    const profile=await readProfile(env.DB,userId);
    if(!profile) return json({error:'profile_not_found'},404);
    const actor=admin?{kind:'admin' as const,id:'admin'}:{kind:'agent' as const,id:'profile-agent',userId};
-   const preview=async()=> (await store.all<SourceRow>('SELECT * FROM sources ORDER BY id')).map(s=>({id:s.id,name:s.name,...planSource({...s,tags:JSON.parse(s.topics_json)},[profile])}));
+   const preview=async()=> (await store.all<SourceRow>("SELECT * FROM sources WHERE acquisition='rss' ORDER BY id")).map(s=>({id:s.id,name:s.name,...planSource({...s,tags:JSON.parse(s.topics_json)},[profile])}));
    if(request.method==='GET') {
     if(!action) return json(profile);
     if(action==='history') return json(await listProfileHistory(env.DB,userId));
     if(action==='tools') return json({tools:PROFILE_TOOLS});
-    if(action==='collection-plan') return json({scope:'this_user',sources:await preview()});
+    if(action==='collection-plan') return json({scope:'this_user',sources:await preview(),searchPlans:buildSearchPlans([profile])});
    }
    if(request.method==='POST' && ['changes','undo','tools'].includes(action)) {
     let body:unknown;
@@ -60,19 +66,20 @@ export async function handleRequest(request:Request,env:Env):Promise<Response> {
     let call;try {call=parseToolCall(body);}catch{return json({error:'invalid_tool_call'},400);}
     if(call.name==='get_profile') return json(profile);
     if(call.name==='list_profile_changes') return json(await listProfileHistory(env.DB,userId));
-    if(call.name==='preview_collection_plan') return json({scope:'this_user',sources:await preview()});
+    if(call.name==='preview_collection_plan') return json({scope:'this_user',sources:await preview(),searchPlans:buildSearchPlans([profile])});
     if(call.name==='update_profile') return json(await mutateProfile(env.DB,userId,call.arguments,actor));
     return json(await undoProfile(env.DB,userId,call.arguments,actor));
    }
    return json({error:'not_found'},404);
   }
   if(request.method==='POST' && url.pathname==='/api/run') return json(await runPipeline(dependencies(env)));
-  if(request.method==='GET' && url.pathname==='/api/status') return json({llmEnabled:env.LLM_ENABLED==='true',pushEnabled:env.PUSH_ENABLED==='true',limits:LIMITS,runs:await store.all('SELECT * FROM runs ORDER BY started_at DESC LIMIT 20'),jobs:await store.all('SELECT status,count(*) AS count FROM judgments GROUP BY status'),outbox:await store.all('SELECT status,count(*) AS count FROM outbox GROUP BY status')});
+  if(request.method==='GET' && url.pathname==='/api/status') return json({searchEnabled:env.SEARCH_ENABLED==='true',searchConfigurationValid:(()=>{try{searchConfig(env);return true;}catch{return false;}})(),llmEnabled:env.LLM_ENABLED==='true',pushEnabled:env.PUSH_ENABLED==='true',limits:LIMITS,runs:await store.all('SELECT * FROM runs ORDER BY started_at DESC LIMIT 20'),jobs:await store.all('SELECT status,count(*) AS count FROM judgments GROUP BY status'),outbox:await store.all('SELECT status,count(*) AS count FROM outbox GROUP BY status')});
   if(request.method==='GET' && url.pathname==='/api/sources') return json(await store.all('SELECT * FROM sources ORDER BY id'));
   if(request.method==='PUT' && url.pathname==='/api/sources') {
    const source=parseSource(await readJson(request));
+   if(source.id.startsWith('search_')) return json({error:'reserved_source_id'},400);
    const existing=await store.first('SELECT id FROM sources WHERE id=?',source.id);
-   const count=await store.first<{count:number}>('SELECT count(*) AS count FROM sources');
+   const count=await store.first<{count:number}>("SELECT count(*) AS count FROM sources WHERE acquisition='rss'");
    if(!existing && (count?.count??0)>=20) return json({error:'source_limit'},409);
    await store.saveSource(source); return json({ok:true,id:source.id});
   }

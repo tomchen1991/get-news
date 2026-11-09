@@ -38,7 +38,7 @@ describe('scoped profile API',()=>{
   expect(history).toMatchObject([{changeId:'change-1',revision:1,actor:{kind:'agent',id:'profile-agent'}}]);
   const undo={expectedRevision:1,changeId:'undo-1',targetChangeId:'change-1',reason:'User undid',evidence:'User: undo it'};
   expect(await (await call(route+'/tools','POST',{name:'undo_profile_change',arguments:undo})).json()).toMatchObject({profile:{revision:2,preferences:{delivery:'alert'}}});
-  expect(await (await call(route+'/tools','POST',{name:'preview_collection_plan',arguments:{}})).json()).toEqual({scope:'this_user',sources:[]});
+  expect(await (await call(route+'/tools','POST',{name:'preview_collection_plan',arguments:{}})).json()).toMatchObject({scope:'this_user',sources:[],searchPlans:[{query:'ai'}]});
   expect(await (await call('/api/profiles/bob/history','GET',undefined,admin)).json()).toEqual([]);
  });
  it('direct update/undo endpoints return safe invalid and conflict responses',async()=>{

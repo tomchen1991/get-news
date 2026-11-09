@@ -213,3 +213,26 @@ npx wrangler secret put PROFILE_AGENT_TOKEN
 画像每次修改都会在同一事务抑制旧的 pending 消息；发送预订还会核验当前版本，防止旧偏好发送。已预订、正在发送的外部请求不能撤回，已发送/结果不确定的记录不会重放。历史新闻不会因为撤销或改偏好自动补发。
 
 **本版边界：** `digest` 只保留日报候选、不推即时快讯；日报定时汇总与发送尚未实现。没有向量库、兴趣自动衰减、点击反馈采集、自动扩充来源或聊天前端。先让画像更新、审计、来源计划与推荐闭环可用，不额外增加模型调用成本。
+
+## 个性化新闻搜索（Tavily / Cloudflare）
+
+搜索是 RSS 的补充，不替代订阅。默认 `SEARCH_ENABLED=false`，没有真实 API 调用或自动双搜。
+启用前先应用 `0004_search.sql`（先本地验证、备份生产 D1，再由部署负责人操作）。本次没有自动部署。
+
+- `SEARCH_PROVIDER=tavily`：固定 News + basic，关闭自动参数升级、答案、正文抽取和图片，一次一个专题，最多 10 条，预留 1 credit。
+- `SEARCH_PROVIDER=cloudflare`：调用官方 Web Search REST，固定 **Ceramic**，最多 10 条。不是 Tavily News 的等价新闻索引，不假定结果有发布日期，也不比较两家的相关性分数。CF 是另行计费服务，`credits=0` 仅指没有 Tavily credits，不代表免费。
+- 专题从每个启用用户的显式 `interests`、topics 偏好生成；相同专题合并请求，共享结果。排除和暂停生效，prefer 最快 30 分钟，默认 60 分钟，less/digest 180 分钟。轮流处理最久未查询的到期专题，每次最多一个，最多 30 个规范化专题。更多专题会截断，应保持少量清晰类别。
+- 推断兴趣、用户名字和反馈证据不外发。但显式兴趣本身仍可能包含隐私：**开启搜索前请审核兴趣标签并授权将其交给选定提供商**。模型修改画像后，下个槽位自动重算计划。
+- 默认上海时区 `SEARCH_TIMEZONE=Asia/Shanghai`，08:00 到 22:00（含两端）每半小时，29 槽/日。Cron 改成每 10 分钟唤醒，RSS 仍按原有 20 分钟或画像计划独立采集；仅 00/30 分钟可能搜索。重复 Cron / 手动 `/api/run` 不增加同槽请求，错过不补跑。通知静默时间仍独立控制。
+- `TAVILY_DAILY_CREDITS=29`、`TAVILY_MONTHLY_CREDITS=900`；CF 使用独立 `CF_SEARCH_DAILY_REQUESTS=29`、`CF_SEARCH_MONTHLY_REQUESTS=900`。每次请求前 D1 原子预留；失败、超时、崩溃均计入且不退款。不自动重试。31 天最多 899 次，免费额度是 Tavily **账号级**，其他项目消耗不在本地账本，务必同时设供应商限额。日/月按所配时区计算。
+- 401/403/配置错误暂停直到管理员修正；429/暂时错误至少等待下个半小时（尊重 Retry-After），配额错误保守暂停到下月。修改 secret 后管理员 `POST /api/search/resume` 清除暂停，不清预算或重放旧槽。
+- 首次专题查询只建立基线；后续只有明确且新鲜的日期可进入提醒判断。缺日期、旧日期、未来日期只供发现/查看，不推送。CF 通常无发布日期，因此当前默认仅发现用途，不能虚构日期来制造“实时新闻”。
+- canonical URL 与已有 RSS 文章统一去重，judgment/outbox 继续复用既有防重。`search_attempts` 记录查询、来源、保留额度、响应 request ID、状态；`search_results` 保留名次、日期和文章关联。RSS 首次无日期基线规则不变；已存在 RSS 文章的来源/日期不会被搜索覆盖；搜索发现的未提醒文章可由后续明确新鲜日期的 RSS 升级，避免搜索结果阻断 RSS 提醒。
+
+配置：Tavily 用 `wrangler secret put TAVILY_API_KEY`；CF 用 `CF_ACCOUNT_ID`、`wrangler secret put CF_SEARCH_API_TOKEN`，可选 `CF_SEARCH_GATEWAY_ID`。CF token 权限按官方 Web Search 指南的 Workers AI Read / AI Gateway Read，勿用 Global API Key。不要提交 `.dev.vars`。两家只启用选中的一家，不自动回退收费。
+
+管理员 `GET /api/search` 查看有效专题、近 100 次调用及暂停状态；画像代理只能通过自己的 `collection-plan` 查看自己专题，不能操作预算、secret、全局查询记录或恢复接口。
+
+未来对照可用统一 `SearchProvider.search({query,maxResults:10})` 运行同查询、同时间窗的独立离线评测：目前没有自动 A/B 或双倍请求，结果质量与时效需真实样本验证。不要把 CF 缺失日期当搜索失败，也不要把 Tavily/CF 分数横比。
+
+官方依据：[Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[CF Web Search 使用](https://developers.cloudflare.com/web-search/how-to-use/)、[CF providers](https://developers.cloudflare.com/web-search/providers/)。接口通过 mock 测试，未使用真实 key 付费验证。

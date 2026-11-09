@@ -8,6 +8,10 @@ export interface Decision { important: boolean; shouldPush: boolean; score: numb
 export interface Judge { evaluate(item: NewsItem, profile: UserProfile): Promise<Decision> }
 export interface Env {
  DB: D1Database;
+ SEARCH_ENABLED?:string; SEARCH_PROVIDER?:string; SEARCH_TIMEZONE?:string;
+ TAVILY_API_KEY?:string; TAVILY_DAILY_CREDITS?:string; TAVILY_MONTHLY_CREDITS?:string;
+ CF_ACCOUNT_ID?:string; CF_SEARCH_API_TOKEN?:string; CF_SEARCH_GATEWAY_ID?:string;
+ CF_SEARCH_DAILY_REQUESTS?:string; CF_SEARCH_MONTHLY_REQUESTS?:string;
  ADMIN_TOKEN?: string;
  // Optional scoped profile-tool credential. Never grants source/run/admin access.
  PROFILE_AGENT_TOKEN?: string; PROFILE_AGENT_USER_ID?: string;
