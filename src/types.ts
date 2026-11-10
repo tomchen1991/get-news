@@ -16,6 +16,7 @@ export interface Env {
  // Optional scoped profile-tool credential. Never grants source/run/admin access.
  PROFILE_AGENT_TOKEN?: string; PROFILE_AGENT_USER_ID?: string;
  LLM_API_KEY?: string; LLM_BASE_URL?: string; LLM_MODEL?: string;
+ PUSH_PROVIDER?: 'webhook'|'wecom'; WECOM_WEBHOOK_URL?: string;
  PUSH_WEBHOOK_URL?: string; PUSH_WEBHOOK_TOKEN?: string;
  // Both flags default to false. Dry runs still use a paid LLM if enabled.
  LLM_ENABLED?: string; PUSH_ENABLED?: string;

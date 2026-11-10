@@ -5,7 +5,8 @@ import { LIMITS, parseProfile, parseSource } from './config';
 import { Store } from './store';
 import { createRssAdapter } from './sources';
 import { createJudge } from './llm';
-import { createWebhookNotifier } from './notifications';
+import { createWebhookNotifier, createWecomNotifier } from './notifications';
+import { adminAsset } from './admin';
 import { runPipeline } from './engine';
 import { readProfile, mutateProfile, undoProfile, listProfileHistory, ProfileError } from './profiles';
 import { PROFILE_TOOLS, parseToolCall } from './profile-tools';
@@ -29,13 +30,15 @@ async function readJson(request:Request):Promise<unknown> {
 }
 export function dependencies(env:Env) {
  const judge=env.LLM_ENABLED==='true'?createJudge({baseUrl:env.LLM_BASE_URL??'',apiKey:env.LLM_API_KEY??'',model:env.LLM_MODEL??''}):undefined;
- const notifier=env.PUSH_ENABLED==='true'?createWebhookNotifier(env.PUSH_WEBHOOK_URL??'',env.PUSH_WEBHOOK_TOKEN??''):undefined;
+ if(env.PUSH_ENABLED==='true' && env.PUSH_PROVIDER && !['webhook','wecom'].includes(env.PUSH_PROVIDER)) throw new Error('Invalid push provider');
+ const notifier=env.PUSH_ENABLED==='true'?(env.PUSH_PROVIDER==='wecom'?createWecomNotifier(env.WECOM_WEBHOOK_URL??''):createWebhookNotifier(env.PUSH_WEBHOOK_URL??'',env.PUSH_WEBHOOK_TOKEN??'')):undefined;
  let search,searchConfigurationError=false;
  try {search=searchConfig(env);} catch {searchConfigurationError=true;}
  return {store:new Store(env.DB),sources:new Map([['rss',createRssAdapter()]]),judge,notifier,search,searchConfigurationError};
 }
 export async function handleRequest(request:Request,env:Env):Promise<Response> {
  const url=new URL(request.url);
+ if(request.method==='GET') { const asset=adminAsset(url.pathname); if(asset) return asset; }
  if(url.pathname==='/health' && request.method==='GET') return json({service:'get-news',version:'0.1.0'});
  const admin=await authorized(request,env.ADMIN_TOKEN);
  const agent=!admin && !!env.PROFILE_AGENT_USER_ID && await authorized(request,env.PROFILE_AGENT_TOKEN);
@@ -73,7 +76,7 @@ export async function handleRequest(request:Request,env:Env):Promise<Response> {
    return json({error:'not_found'},404);
   }
   if(request.method==='POST' && url.pathname==='/api/run') return json(await runPipeline(dependencies(env)));
-  if(request.method==='GET' && url.pathname==='/api/status') return json({searchEnabled:env.SEARCH_ENABLED==='true',searchConfigurationValid:(()=>{try{searchConfig(env);return true;}catch{return false;}})(),llmEnabled:env.LLM_ENABLED==='true',pushEnabled:env.PUSH_ENABLED==='true',limits:LIMITS,runs:await store.all('SELECT * FROM runs ORDER BY started_at DESC LIMIT 20'),jobs:await store.all('SELECT status,count(*) AS count FROM judgments GROUP BY status'),outbox:await store.all('SELECT status,count(*) AS count FROM outbox GROUP BY status')});
+  if(request.method==='GET' && url.pathname==='/api/status') return json({searchEnabled:env.SEARCH_ENABLED==='true',searchConfigurationValid:(()=>{try{searchConfig(env);return true;}catch{return false;}})(),llmEnabled:env.LLM_ENABLED==='true',pushEnabled:env.PUSH_ENABLED==='true',pushProvider:env.PUSH_PROVIDER??'webhook',limits:LIMITS,runs:await store.all('SELECT * FROM runs ORDER BY started_at DESC LIMIT 20'),jobs:await store.all('SELECT status,count(*) AS count FROM judgments GROUP BY status'),outbox:await store.all('SELECT status,count(*) AS count FROM outbox GROUP BY status')});
   if(request.method==='GET' && url.pathname==='/api/sources') return json(await store.all('SELECT * FROM sources ORDER BY id'));
   if(request.method==='PUT' && url.pathname==='/api/sources') {
    const source=parseSource(await readJson(request));

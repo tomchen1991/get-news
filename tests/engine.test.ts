@@ -3,6 +3,7 @@ import { createDatabase } from './d1';
 import { Store } from '../src/store';
 import { runPipeline } from '../src/engine';
 import { LIMITS } from '../src/config';
+import { createWecomNotifier } from '../src/notifications';
 import type { Decision, NewsItem, SourceAdapter, UserProfile } from '../src/types';
 const NOW=Date.parse('2026-11-09T04:00:00Z'); // noon Shanghai
 const profile:UserProfile={id:'owner',name:'Owner',interests:['AI'],excludedTopics:['rumors'],minScore:75,minConfidence:.8,dailyLimit:3,timezone:'Asia/Shanghai',quietStart:22,quietEnd:8,enabled:true};
@@ -17,6 +18,19 @@ describe('pipeline with real SQLite SQL',()=>{
   const evaluate=vi.fn().mockResolvedValue(decision),send=vi.fn().mockResolvedValue('sent');
   return {fetch,evaluate,send,deps:{store,sources:new Map([['rss',{kind:'rss',fetch} as SourceAdapter]]),judge:{evaluate},notifier:{send},now:()=>time}};
  }
+ it('reserves WeCom delivery before I/O and never replays an ambiguous acknowledgement',async()=>{
+  const s=setup();
+  const fetcher=vi.fn(async()=>{
+   expect(await store.first('SELECT status FROM outbox')).toEqual({status:'sending'});
+   expect(await store.first('SELECT reservations FROM daily_usage')).toEqual({reservations:1});
+   return new Response('ambiguous');
+  });
+  const deps={...s.deps,notifier:createWecomNotifier('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=mock',fetcher)};
+  await runPipeline(deps);
+  expect(await store.first('SELECT status FROM outbox')).toEqual({status:'uncertain'});
+  time+=LIMITS.pollMs;await runPipeline(deps);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+ });
  it('collects, judges, persists and delivers once across duplicate polls',async()=>{
   const s=setup(); const first=await runPipeline(s.deps);expect(first.accepted).toBe(1);expect(s.send).toHaveBeenCalledOnce();
   expect(await store.first('SELECT status FROM outbox')).toEqual({status:'sent'});

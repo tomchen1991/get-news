@@ -5,8 +5,11 @@ LLM_ENABLED=false
 LLM_BASE_URL=https://api.your-provider.com/v1
 LLM_MODEL=replace-with-an-explicit-model-id
 LLM_API_KEY=
-# Generic JSON webhook, not an assumed Telegram/WeCom format.
+# wecom = enterprise WeChat group robot; webhook = generic JSON transport.
+# Keep disabled until the target group and budget are confirmed.
 PUSH_ENABLED=false
+PUSH_PROVIDER=wecom
+WECOM_WEBHOOK_URL=
 PUSH_WEBHOOK_URL=
 PUSH_WEBHOOK_TOKEN=
 # Optional conversational-agent credential: restricted to this user's profile APIs.
