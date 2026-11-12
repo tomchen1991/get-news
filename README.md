@@ -6,7 +6,7 @@ Cloudflare Workers + D1 的个人新闻站：**定时搜索 → Jev 结构化评
 
 当前生产入口为 `src/site/index.ts`，不开放管理、画像修改、手动运行或推送接口，**不需要 ADMIN_TOKEN，不发送 webhook**。历史 MVP 代码与数据表暂留，但没有接入当前部署入口，说明见 [历史文档](docs/legacy-mvp.md)。
 
-开发此项目的 DeckZ 协作 PI 人物状态复用宿主统一上报，不是 Worker 新闻上报；接线与验收边界见 [人物状态接入](docs/presence-integration.md)。
+Worker 内热点 agent 的人物状态可独立上报采集服务，默认关闭；接线与运行边界见 [Worker agent 状态上报](docs/worker-presence.md)。
 
 ## 已实现与边界
 

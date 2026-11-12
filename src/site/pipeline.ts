@@ -8,8 +8,9 @@ import { feedbackContext } from './feedback';
 import { modelDiagnostic } from './diagnostics';
 import type { PushEventEnv } from './push';
 import { collectionSince, isNonNewsPage } from './source-policy';
+import type { WorkerPresenceEnv } from './worker-presence';
 
-export interface SiteEnv extends AccessEnv, PushEventEnv {
+export interface SiteEnv extends AccessEnv, PushEventEnv, WorkerPresenceEnv {
   DB: D1Database;
   AI?: AiBinding;
   SEARCH_ENABLED?: string;

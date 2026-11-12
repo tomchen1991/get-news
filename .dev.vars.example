@@ -19,6 +19,12 @@ DIGEST_MONTHLY_REQUESTS=31
 # Apply migration 0014 first. Set an explicit UTC activation instant to avoid backfill.
 PUSH_EVENTS_ENABLED=false
 PUSH_EVENTS_SINCE=
+# Optional Worker agent presence, NOT PI. Dedicated producer scope required.
+# HTTPS endpoint must be exactly /ingest/agent_presence/1. Never reuse PI tokens.
+WORKER_PRESENCE_ENABLED=false
+WORKER_PRESENCE_URL=
+WORKER_PRESENCE_SOURCE_ID=
+WORKER_PRESENCE_TOKEN=
 # Optional owner-only writes. Protect /api/feedback* with Access (including login/session).
 FEEDBACK_ENABLED=false
 ACCESS_TEAM_DOMAIN=
