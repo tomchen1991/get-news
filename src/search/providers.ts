@@ -1,7 +1,7 @@
 import { assertPublicHttpsUrl, fetchBounded } from '../http';
 import type { NewsItem } from '../types';
 
-export interface SearchQuery { query: string; maxResults?: number }
+export interface SearchQuery { query: string; maxResults?: number; startDate?: string; endDate?: string }
 export interface SearchResult { items: NewsItem[]; requestId?: string; /** Tavily credits only; CF bills separately, not free. */ credits: number }
 export interface SearchProvider { search(request: SearchQuery): Promise<SearchResult> }
 export type SearchErrorCode = 'configuration' | 'invalid_query' | 'unauthorized' | 'quota' | 'rate_limit' | 'unavailable' | 'http' | 'transport' | 'invalid_response';
@@ -64,7 +64,12 @@ async function request(url: string, key: string, body: Row, fetcher: typeof fetc
 export function createTavilySearchProvider(apiKey: string, fetcher: typeof fetch = fetch): SearchProvider {
   return { async search(input) {
     const { query, limit } = parameters(input);
-    const data = await request('https://api.tavily.com/search', apiKey, { query, topic: 'news', search_depth: 'basic', auto_parameters: false, time_range: 'day', max_results: limit, include_answer: false, include_raw_content: false, include_images: false, include_usage: true }, fetcher);
+    for (const date of [input.startDate, input.endDate]) {
+      if (date !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date)) throw new SearchError('invalid_query');
+    }
+    if (input.endDate && (!input.startDate || input.endDate < input.startDate)) throw new SearchError('invalid_query');
+    const window = input.startDate ? { start_date: input.startDate, ...(input.endDate ? { end_date: input.endDate } : {}) } : { time_range: 'day' };
+    const data = await request('https://api.tavily.com/search', apiKey, { query, topic: 'news', search_depth: 'basic', auto_parameters: false, ...window, max_results: limit, include_answer: false, include_raw_content: false, include_images: false, include_usage: true }, fetcher);
     if (!Array.isArray(data.results)) throw new SearchError('invalid_response');
     const reported = object(data.usage).credits;
     // Missing usage is conservatively charged one basic search. Never trust a

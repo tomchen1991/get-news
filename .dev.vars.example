@@ -1,31 +1,32 @@
-# Copy to .dev.vars (gitignored). Do not commit real values.
-ADMIN_TOKEN=replace-with-a-random-token-of-at-least-32-characters
-# Enable only after choosing the provider, model and spending budget.
-LLM_ENABLED=false
+# Copy to .dev.vars (gitignored). Never commit real values.
+# Current production entry: src/site/index.ts. No ADMIN_TOKEN or push credentials.
+SEARCH_ENABLED=false
+JEV_ENABLED=false
+TAVILY_API_KEY=
+AI_GATEWAY_ID=replace-with-your-gateway-id
+NEWS_TIMEZONE=Asia/Shanghai
+NEWS_MORNING_HOUR=7
+TAVILY_DAILY_CREDITS=36
+TAVILY_MONTHLY_CREDITS=950
+JEV_DAILY_REQUESTS=360
+JEV_MONTHLY_REQUESTS=10000
+# Optional Chinese digest, one immutable issue daily at 09:00 local time.
+DIGEST_ENABLED=false
+DIGEST_MODEL=
+DIGEST_HOUR=9
+DIGEST_MONTHLY_REQUESTS=31
+# Optional push-event capture only; no transport or actual delivery exists yet.
+# Apply migration 0014 first. Set an explicit UTC activation instant to avoid backfill.
+PUSH_EVENTS_ENABLED=false
+PUSH_EVENTS_SINCE=
+# Optional owner-only writes. Protect /api/feedback* with Access (including login/session).
+FEEDBACK_ENABLED=false
+ACCESS_TEAM_DOMAIN=
+ACCESS_AUD=
+FEEDBACK_ALLOWED_EMAILS=
+# AI binding is remote: enabling Jev even in wrangler dev can incur charges.
+# Jev uses the AI binding + Gateway billing; no model API key is read here.
+# Optional legacy local TUI /plan only; never used by the production news site.
 LLM_BASE_URL=https://api.your-provider.com/v1
 LLM_MODEL=replace-with-an-explicit-model-id
 LLM_API_KEY=
-# wecom = enterprise WeChat group robot; webhook = generic JSON transport.
-# Keep disabled until the target group and budget are confirmed.
-PUSH_ENABLED=false
-PUSH_PROVIDER=wecom
-WECOM_WEBHOOK_URL=
-PUSH_WEBHOOK_URL=
-PUSH_WEBHOOK_TOKEN=
-# Optional conversational-agent credential: restricted to this user's profile APIs.
-# Never give ADMIN_TOKEN to the news judge or conversational agent.
-PROFILE_AGENT_TOKEN=
-PROFILE_AGENT_USER_ID=owner
-# Search is opt-in; enabling transmits explicit interest/topic labels to chosen provider.
-SEARCH_ENABLED=false
-SEARCH_PROVIDER=tavily
-SEARCH_TIMEZONE=Asia/Shanghai
-TAVILY_API_KEY=
-TAVILY_DAILY_CREDITS=29
-TAVILY_MONTHLY_CREDITS=900
-# Alternative (not invoked alongside Tavily): paid CF Ceramic Web Search.
-CF_ACCOUNT_ID=
-CF_SEARCH_API_TOKEN=
-CF_SEARCH_GATEWAY_ID=
-CF_SEARCH_DAILY_REQUESTS=29
-CF_SEARCH_MONTHLY_REQUESTS=900

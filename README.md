@@ -1,298 +1,209 @@
 # get-news
 
-一个面向 Cloudflare Workers 的轻量热点追踪服务。
+Cloudflare Workers + D1 的个人新闻站：**定时搜索 → Jev 结构化评估 → 中文日报与历史档案 → 私人反馈改善未来判断**。
 
-**第一版闭环：RSS/Atom/JSON Feed → 每 20 分钟发现新条目 → LLM 结合用户兴趣判断重要性 → 确定性频控 → webhook 发件箱。**
+首版站点：<https://get-news.fzt-tom.workers.dev>（公开只读页面；采集、单次 Noul Jev 和日报生成已开启，反馈关闭。2026-11-11 日报已用 `@cf/deepseek-ai/deepseek-v4.1-flash-1017` 成功发布，正文 210 字、4 个事件附来源。运行记录见 [生产状态](docs/production-status.md)）。
 
-代码可以离线测试、在本地运行；仓库不含真实凭证，也不会默认调用模型或推送。`LLM_ENABLED` 与 `PUSH_ENABLED` 都默认关闭。示例数据不是你的生产配置。
+当前生产入口为 `src/site/index.ts`，不开放管理、画像修改、手动运行或推送接口，**不需要 ADMIN_TOKEN，不发送 webhook**。历史 MVP 代码与数据表暂留，但没有接入当前部署入口，说明见 [历史文档](docs/legacy-mvp.md)。
 
-## 已实现 / 尚未实现
+## 已实现与边界
 
-已实现：
-- `SourceAdapter` 抽象，RSS / Atom / JSON Feed 实现；ETag / Last-Modified 条件请求，支持 304。
-- D1 持久化来源、文章、兴趣配置、判断记录、每日额度、运行状态和发件箱。
-- 可配置的 OpenAI-compatible LLM 接口：项目控制提示词，**不传工具、不运行完整 Agent**；严格 JSON 验证，失败不推送。
-- 规范化 URL 去重、旧闻过滤、每用户阈值、当地时区/安静时段/每日上限。
-- 管理 API，默认关闭模型和推送时可以先检查采集结果。
-- 通用 JSON webhook 适配器。请求携带稳定 `Idempotency-Key`，接收方应保存并去重。
-- 离线 HTTP mock + SQLite 集成测试、类型检查、Worker 打包、GitHub Actions CI。
+- D1 按专题保存关注规则、子查询、语言（由搜索词体现）、执行日期与启用状态。
+- Tavily News + basic，每条查询最多 10 条，不生成答案、不自动升级、不自动扩搜。
+- Jev `typesafe/jev-1.14.0` 通过 `AI` binding 和指定 AI Gateway 调用，无工具、无浏览权限。
+- 固定完整画像 + 历史弱反馈注入 Jev，只问一次 Noul：“这条新闻是否值得主人花时间阅读？”返回 yes 概率用于排序，不加权、不设分数门槛。频道仅用于采集组织，不限制评估领域。
+- D1 预留预算、规范 URL 去重、日期过滤、Cron 互斥、错误审计。
+- `/` 为公开只读的白天滚动标题页，`GET /api/updates` 按小时搜索批次返回最多三条标题和原文链接；整批评分结束后才展示，保留最近 14 天内最多 33 轮。`GET /api/news` 保留原入选新闻投影。浏览页面不会搜索、评估或发送消息。
+- 可选主模型经同一 Gateway 生成中文日报：全领域 Jev 分数前 10 条进入二次筛选，整篇正文 200–300 字，合并同事件报道并保留来源引用，提供 `/daily` 历史列表和日期链接。白天滚动不调用主模型。
+- 可选 Cloudflare Access 保护的个人新闻反馈，支持原因、撤销、并发版本检查与审计；只作为未来评估的弱参考，不自动改写画像或旧日报。
 
-尚未实现：
-- WebSub 推送订阅：不是所有 RSS 都支持更新事件。第一版使用 **Cron 每 20 分钟轮询**，不是实时通知。
-- 自动生成/发送每日综述、自然语言反馈学习、向量库/语义事件合并、自动全文抓取。
-- 用户登录/多租户权限体系、Telegram 模板。已有静态管理页和企业微信群机器人文本快讯；仍是单一管理密钥保护的轻量服务，不是多租户中台。
+滚动页 `/` 仅展示每轮最高分的最多三条来源标题和链接，标题可能为英文；中文日报位于 `/daily/YYYY-MM-DD`。仅做确定性的规范 URL 去重，不增加 Jev 语义去重。不同 URL 的同事件合并仅由晨间日报主模型完成，不能保证语义去重正确；白天滚动仍可能有重复事件。不把 Tavily 排名当热度，也不把 Jev 分数当事实验证。
 
-LLM 目前只看**标题、Feed 提供的纯文本摘要和发布时间**，无法独立验证事实，也不读取新闻全文。不同 URL 的转载暂时不会语义合并。RSS 内容和模型输出都不应视为可信指令。
+## 采集计划
 
-## 结构
+默认北京时间 **07:00–10:00（不含 10:00）** 完成晨间采集。Cron 每 10 分钟唤醒，晨间每轮最多 3 条搜索，每条子查询的晨间请求每天最多尝试一次；逐批完成当天计划，不在浏览请求中启动工作。
 
-```
-src/sources/       可插拔采集源（当前 rss）
-src/llm/           可替换的重要性判断接口
-src/engine.ts     定时流水线、重试与推送策略
-src/store.ts      D1 持久化及并发控制
-src/notifications.ts  通用 webhook
-src/index.ts      Worker HTTP / Cron 入口
-migrations/       D1 schema
-scripts/          本地示例配置
-```
+此外，**10:00、11:00……20:00（含两端）各增加一次搜索，每天 11 次**。每次只选一个频道的一条子查询，不是全频道刷新。
 
-新增来源时实现 `SourceAdapter`，输出标准 `NewsItem`，注册到 `dependencies()`；同时扩展来源配置验证和数据库 kind 约束。不需要改动 LLM 或推送代码。
+| 频道 | 子查询数 | 执行日 |
+| --- | ---: | --- |
+| AI 模型与产品进展 | 3 | 每天 |
+| Agent 与 AI 开发实践（含开发工具） | 3 | 每天 |
+| 任天堂 | 2 | 每天 |
+| 手机、数码与跨设备体验 | 3 | 每天 |
+| 单机游戏（含 XGP） | 3 | 每天 |
+| 武汉三镇 / 中国足球、英超、欧冠 | 3 | 周五、六、日 |
+| 智能汽车与特斯拉 | 2 | 周四、日 |
+| 武汉本地实用资讯 | 2 | 周四、日 |
+| 育儿、健康与力量训练 | 3 | 周四、日 |
 
-## 本地 Tavily 交互预览
+完整查询初稿在 `migrations/0005_news_site.sql`，小时轮转配置在 `0006_hourly_refresh.sql`，`0007_core_only_hourly.sql` 将低频频道移出小时轮转。晨间 121 次 + 小时刷新 77 次 = **198 次 basic 搜索/周，平均约 860 credits/月**；按 31 天保守上界约 890 credits，默认月预算 950。日报模型费用不包含其中，其他项目仍会共享账号额度。
 
-无需部署或 D1，在 Node.js 22+ 终端运行：
+### 小时刷新如何分配
+
+- 白天仅轮转核心频道，足球仍仅周五六日参与。汽车/武汉/健康不参加白天轮转，只保留周四和周日的晨间采集。
+- D1 `site_topics.refresh_weight`：核心频道默认 **3**，低频频道 **0**；同级频道同权，不默认偏爱技术。`0` 表示不参加小时刷新，不影响晨间采集。
+- 使用持久化的平滑加权轮转，累计权重欠账，避免每天从头总选同一频道；这只是采集重要性，不改变 Jev 的评分规则。
+- 选中频道后，请求其**最久未尝试的子查询**（晨间与小时历史合并计算），不是每次请求整个频道的所有查询。
+- 每个本地日期/小时只有一个 D1 预算预留键；重复 Cron、失败或崩溃都不自动换频道重试。预算不足不会消耗轮转权重。
+- 使用 Cron 原定时间识别槽位，容忍最多 5 分钟的调度延迟；非整点的 Cron 只处理评估队列，不补搜错过的小时。
+- 默认每天搜索总数：周一二三各 25、周四 32、周五六各 28、周日 35。固定查询仍是可调整初稿，不代表完整覆盖。
+
+- 所有查询使用重叠窗口：至少回看“专题间隔 + 1 天”，漏跑时扩展到上次成功查询，最多 14 天。查询使用本地日期，程序再做精确时间过滤；上次搜索时间不再作为新报道的发布时间门槛。
+- 首次搜索也接纳窗口内有明确日期的报道，按 canonical URL 去重；晚搜到的旧报道仍可进入评分。无日期、过旧或未来超过 5 分钟的条目不进入评分。明确的 IGN `/playlist/` 收藏页在采集前排除，不增加评分门槛。旧 baseline 再次被搜到且符合窗口时可恢复为待评估。
+- 无日期、窗口外、超过 5 分钟的未来日期不发布；搜索自报日期未独立验证。
+- 晨间之外继续分批评估积压，每轮最多 8 次 Jev 请求；候选等待超过 48 小时过期。小时搜索仅将新进入评估队列的候选归入本轮，已知 URL 不重复入轮；本轮所有候选完成或过期后，按分数、发布日期和 ID 排序，取最多三条已入选标题，不足不凑数，评分失败不编造结果。迁移前的小时搜索无法还原批次成员，不补造历史。
+- 原 `GET /api/news` 仍展示最近 14 天入选内容，最多 100 条，每个规范 URL 只展示一个最高分频道。
+- 错过整段晨间窗口不补跑；白天小时刷新独立进行。下次成功查询扩大回看窗口，但超过 14 天仍可能漏报。
+- D1 `weekdays_json` 使用周日 `0` 至周六 `6`。修改查询文本不会把已有 URL 重新评分。画像规则通过 D1 SQL / 迁移维护，无公开编辑入口。
+
+## 评分画像与确定性策略
+
+固定画像在 `src/llm/editorial-profile.ts`，不包含家人姓名、职业和未确认性格推测。技术、数码、任天堂、单机游戏、足球均有独立兴趣价值，采集频率不影响重要性判断。
+
+策略版本 2：每条候选只请求一个 **Noul** 问题 `worthReading`：
+
+> Given the owner's full editorial profile, is this news worth their time to read?
+
+输入是完整固定画像、新闻标题/摘要/链接/日期，以及近期弱反馈。不发送频道名称、规则或优先级作为评估约束；任何领域都按主人整体兴趣判断。问题不附加评分档位或分项门槛，结果是“值得阅读”这一判断成立的概率，而不是相关程度、新闻质量或事实可信度。
+
+严格校验 `[0,1]` 概率后，仅为兼容现有字段存储 `score = 100 × worthReading`，保留精度用于排序。**不再加权，不设 70 分线，不设相关性/质量/排除阈值**；所有有效响应均进入候选排序池，数据库沿用 `accepted` 状态表示可参与排序，并不意味着已被日报编辑选中。日报按新鲜度优先、同窗口内按分数排序，最多 10 条进入主模型二次筛选；白天每轮只展示前 3 条。非法响应、超时和请求失败仍拒绝，不编造分数。
+
+旧版四维 Noul 加权策略和判定结果仅作为历史记录保留，不自动重评、不重新解释旧分数、不改写已发布日报。新判断在 `evaluation_json` 中记录 `version:2`、原始 `worthReading` 与反馈版本。
+
+## 中文日报与历史档案
+
+迁移 `0008_digests_feedback.sql` 增加日报、输入快照、引用来源和私人反馈表；`0009_rolling_news.sql` 增加小时搜索的候选成员关系。默认 `DIGEST_ENABLED=false`，必须明确选择 `DIGEST_MODEL` 才能启用。
+
+- 默认北京时间 **09:00–10:00** 的第一个可用 Cron 生成当天一期；`DIGEST_HOUR` 可调整。采集与 Jev 先运行，日报独立处理，即使采集失败也不会删除此前日报。
+- 普通日报以生成时刻为截止，优先读取最近 **24 小时**发布且有有效 Jev 判断的候选；允许 **24–48 小时**内的重要漏报作为补录，超过 48 小时、无有效日期或晚于截止时间的内容不进入输入。采集回看窗口不变，不按自然日切分。
+- 同 URL 跨频道取最高排序值；先选最近 24 小时，再选补录窗口，各窗口内按分数降序、发布日期降序、ID 升序，合计最多 10 条，不分频道名额，不足不凑数。补录由主模型从严筛选，仅保留重要具体进展，不能用旧闻填充；引用补录来源的事件标题由程序强制加“【补录】”，来源展示发布时间及补录标记。重要性和跨 URL 同事件去重仍依赖编辑模型，不是确定性保证。
+- 截稿时仍有未完成评估的候选会标注；未进入本次输入的候选只有仍在新鲜度窗口内才可进入下一期。已发布日报不回写。受信 CLI 的当天补发/空刊恢复仍保留独立的当天限制，不扩大其授权范围。
+- 主模型二次筛选、合并同事件，生成一篇 200–300 字的中文正文和 0–10 个事件来源索引，不生成逐条长摘要。字数按去除空白后的 Unicode 字符数计（含标点，不含独立标题和来源列表）；有事件时严格校验最终正文上下限。若模型原稿为 190–199 字，仅追加固定提示“以上仅据摘要整理，请核对原文。”，不新增新闻事实、不调用模型重写；其余非法输出不发布、不自动付费重试。
+- 每个事件引用 1–10 个本次提供的文章 ID，来源 ID 必须存在且不能跨事件重复。链接来自 D1，不采用模型生成的 URL。弱内容可全部省略；无入选事件时允许较短的真实空简报，不为了字数编造新闻。
+- 提供最近 7 期中最多 16 条事件简述作为防重复参考；同一事件有实质新进展仍可报道。不能保证跨天语义识别准确，不是事实核验。
+- 当天最多一次生成尝试，月请求默认上限 31，失败、超时或崩溃计入且不自动重试。输出非法不发布，上一期保持可访问。没有新候选时直接留档一份明确的空简报，不调用主模型、不占模型请求预算。
+- 日报正文、引用的标题/摘要/日期/链接、画像与输入快照一并保存。已发布正文不随原文或画像变化重写；白天更新只进入实时列表。当前不提供公开改稿或重生成入口。
+- 已进入成功编辑输入的原 URL（包括编辑舍弃的条目）不会原样再次送入日报；失败输入不标记已处理。新 URL 的相关后续仍会经模型检查，未进入本次 10 条输入的候选在 48 小时窗口内可留到后续期。
+- `/daily` 为历史列表，`/daily/YYYY-MM-DD` 为永久阅读地址；`GET /api/digests` 每页最多 31 期，使用 `before` 日期向前翻页；`GET /api/digests/latest` 和 `/api/digests/YYYY-MM-DD` 只返回发布内容，不返回私人画像、输入或原始输出。
+
+日报只根据搜索摘要成文，不读取全文。中文翻译、事件合并和事实陈述仍可能出错，必须保留原文便于核对。历史留档暂不自动删除，后续保留策略需要同时考虑 D1 容量和引用快照。
+
+### 受控补发当天首期
+
+仅运维可在 `wrangler.jsonc` 临时设置 `MANUAL_ISSUE_DAY=YYYY-MM-DD` 并部署，由下一次原有 Cron 执行（不修改 Cron，不开放 HTTP 管理接口）。必须是当前用户时区日期，搜索/Jev/日报开关均须开启。
+
+- `0010_manual_issues.sql` 保存初次预留历史；`0012_manual_authorizations.sql` 将其复制到 `site_manual_authorizations`，按日期和明确授权标识记录每次运维任务。默认授权为 `initial`；只有负责人重新明确授权后，才能设置新的 `MANUAL_ISSUE_AUTHORIZATION` 标识续跑，不能自动更换标识重试。原始失败审计、已收费搜索和失败候选均不重置；日报仍保留每天一次生成预留。运行中后续 Cron 不重叠执行。
+- 使用真实当前时间和通常的日/月预算及搜索、评估、日报预留键；今日应采查询全部完成、队列清空后才生成一期。搜索只取当天明确日期的新内容，允许本次授权将当天已有首次查询基线送去评估，不引入此前历史。
+- 失败立即停止，不清除预算或失败记录；查看 `site_manual_authorizations`、`site_attempts` 和 `site_candidates` 诊断。日报失败另有 `site_digest_attempts.diagnostic_json` 保存脱敏错误及输出片段。中断的任务保持 running，须人工确认而非自动重试。
+- 执行结束后移除 `MANUAL_ISSUE_DAY`、`MANUAL_ISSUE_AUTHORIZATION`（以及下述 `MANUAL_ISSUE_REGENERATE`，若有）并重新部署。普通排期不变；正常采集也已采用重叠窗口，不再把首次查询结果一律作为基线。不要为重试而删除任务记录或变造日期。
+
+策略升级后，若负责人明确要求重新生成**当天已发布、没有主模型调用和处理输入的空简报**，可同时设置 `MANUAL_ISSUE_REGENERATE=true` 和新的明确授权标识。此专用流程不搜索，只重评当天已保存、尚无 v2 预留的旧策略候选；旧判断归档至 `site_judgment_history`，旧收费记录不改，v2 判断使用独立预留键。已有 v2 失败预留不自动重试。
+
+重新生成的主模型请求先在 `site_digest_regenerations` 预留，与普通日报共享月预算。新输出校验成功后，同一 D1 事务将旧空简报和原 attempt 归档至 `site_digest_revisions`，再替换当前公开快照。失败保留旧页面，不自动重试。不能用此流程覆盖已有主模型正文的日报；不提供公网重生成接口。
+
+若只需使用已有 v2 判断生成正文，设置 `MANUAL_ISSUE_REUSE_JUDGMENTS=true`，不会调用搜索或 Jev。若主模型已返回并保存草稿，只因本地校验失败，可在新的明确授权下设置 `MANUAL_ISSUE_REPLAY_DRAFT_FROM=原授权标识`：仅加载同日同模型的已保存输出，再做相同的确定性提示补充和严格校验，绝不再次调用模型。该本地发布记录 `model=none`、`providerCall=false`，不占额外模型预算；原失败记录保留，公开日报仍标记原作者模型。操作完成后移除上述临时变量。
+
+## 私人反馈与评分参考
+
+新闻列表及日报每条原文可反馈：**想多看这类 / 不感兴趣 / 已知或重复 / 质量差**，附最多 500 字说明，支持撤销。反馈不是公开评论，也不触发搜索、生成或重评。
+
+- 每个用户、文章、频道保存当前反馈及递增版本；变更有不可覆盖的事件记录，请求 ID 防重，并发旧版本返回 409。每用户滚动 24 小时最多 100 次变更。
+- 后续 Jev 仅接收同频道近 90 天的最多 6 条有效反馈，连同标题、原因和时间；邮箱、身份哈希和请求凭证不发送给模型。说明文字属于不可信偏好数据，不是工具指令。
+- 明确画像和频道规则优先。单次负反馈不永久封禁主题；重复不等于不感兴趣，质量差不等于无关；未反馈不视为负反馈。
+- 判断记录保留所用反馈版本与引用，撤销仅影响之后读取反馈的新评估；已在途的模型请求和历史判断不会撤回或重写。不会自动修改主题权重或搜索排期。
+
+### 配置 Cloudflare Access
+
+公开读页面仍不需要 `ADMIN_TOKEN`。反馈是唯一写入口，未配置以下内容时保持关闭：
+
+1. 在自定义域名创建 Access Self-hosted 应用，**保护 `你的域名/api/feedback*`**，包括 login/session 路由，只允许你的邮箱。不要配置 Bypass，也不要允许任意用户；在生产上逐一验证路径规则。
+2. 将 Team 域名（如 `team.cloudflareaccess.com`）和该应用的 Audience Tag 写入 `ACCESS_TEAM_DOMAIN`、`ACCESS_AUD`。
+3. 设置 `FEEDBACK_ALLOWED_EMAILS` secret（逗号分隔的明确邮箱白名单）：`npx wrangler secret put FEEDBACK_ALLOWED_EMAILS`，再开启 `FEEDBACK_ENABLED=true`。
+4. 页面“登录反馈”会跳到同一受保护路径 `/api/feedback/login`，登录并通过 Worker 验证后返回 `/feedback`；页面外壳本身仍可公开访问。浏览器使用 Access 会话 cookie，不在 JS/URL/localStorage 保存管理凭证。
+
+Worker 自行验证 Access JWT 的 RS256 签名、固定 Team JWKS、issuer、audience、有效期和邮箱白名单，**不信任单独的邮箱请求头**。API 私人响应 `no-store`，POST 要求同源 Origin、JSON 且限 4 KB，无 CORS。JWT/JWKS 验证失败时拒绝写入。使用可信设备；Access 的登录和退出由 Cloudflare 管理。
+
+## 本地验证
+
+要求 Node.js 22+（推荐 24）：
 
 ```sh
-npm ci
-# 将 .dev.vars.example 复制为 .dev.vars，在本地填写 TAVILY_API_KEY（不要提交）
-npm run tui -- --env-file .dev.vars
-# 或已通过环境变量设置 TAVILY_API_KEY 时：npm run tui
-```
-
-输入关键词即可主动调用 Tavily News（最近一天、basic、最多 10 条），展示标题、摘要、日期和链接。`/help` 查看帮助，`/quit` 或 Ctrl+C 退出。无需开启 `SEARCH_ENABLED`；此命令是独立人工预览，不启用 Worker 定时任务、不落库、不推送，也不应用用户画像或首次查询基线过滤。原样搜索不调用 LLM；可选的 `/plan` 会调用规划模型。
-
-### 可选：让 Agent 帮你拟词
-
-在同一个 `.dev.vars` 中配置 OpenAI-compatible 模型的 `LLM_BASE_URL`（如提供商 `/v1` 根地址）、`LLM_MODEL`、`LLM_API_KEY`，然后重启 TUI。输入：
-
-```text
-/plan 我关注 AI 编程工具和开源模型，想看具体发布，不要泛泛的行业评论
-```
-
-模型会返回 2–3 个关键词及理由。输入 `1,3` 选择查询、`all` 全选，回车取消；只有明确选择后才调用 Tavily。每条查询分别展示结果，目前不跨查询合并、排序或总结。你也可以取消后自己输入修改过的关键词。
-
-`/plan` 是显式授权的一次模型请求，会将整段需求交给配置的模型提供商并产生费用，**不受 Worker 的 `LLM_ENABLED` 开关控制**。每会话最多 3 次规划尝试（失败也计数），无自动重试；规划失败或输出不合法不会搜索。模型没有工具，不接收搜索结果，不会自动扩搜。新闻判断模型与生产流水线不变。
-
-**每次查询会将搜索词发送给 Tavily 并可能产生费用。**每会话最多 5 次请求，失败也计数，不自动重试；重启会重置上限，**不共享生产 D1 的日/月预算**，请在供应商控制台限制账户用量。搜索排名不代表真实热度，摘要与日期未经独立核验。凭证仅从环境变量或明确指定的本地环境文件读取，不通过交互输入或打印。
-
-## 本地运行
-
-要求 Node.js 22+（测试推荐 24），npm。
-
-```sh
-npm ci
+npm ci --include=dev
 npm run check
-npm run build                  # 只 dry-run 打包，不部署、不调用模型
-cp .dev.vars.example .dev.vars
-# 设置随机 ADMIN_TOKEN（至少 32 字符）；先保持两项开关 false
+npm run build  # dry-run，不部署
 npm run db:migrate:local
-# 先编辑示例兴趣和来源，再执行；不含任何生产配置
-npm run db:seed:local
+cp .dev.vars.example .dev.vars
 npm run dev
 ```
 
-`wrangler.jsonc` 中的全零 database_id 是**明确的占位值**，不是已创建的 Cloudflare 数据库。它用于本地开发；实际部署前需要创建 D1 并替换成返回的真实 ID。`/health` 只证明 Worker HTTP 入口响应，不能证明数据库、来源或外部服务健康。
+默认搜索、Jev、日报和反馈都关闭，无需真实凭证即可查看空页面。**AI binding 是远程资源**；本地开启 `JEV_ENABLED=true` 或 `DIGEST_ENABLED=true` 并正确配置 Gateway 后，会产生真实推理调用。不要把本地开发当成天然离线环境。测试全部 mock 外部调用。
 
-`wrangler dev --test-scheduled` 可测试本地 Cron；也可以手动执行受保护的 `POST /api/run`。人工执行与 Cron 使用同一分布式锁。
+## 首次 Cloudflare 部署（需手动）
 
-## 配置与管理 API
+1. 创建 D1：`npx wrangler d1 create get-news`，将返回的真实 `database_id` 填入 `wrangler.jsonc`。当前账户已创建同名数据库并完成至 `0013` 的迁移，ID 已填入配置；本账户后续部署复用它，不重复创建。迁往其他账户时需替换该 ID。
+2. 创建同账户 AI Gateway。按 Cloudflare 当前要求配置 Jev 的模型访问与 Unified Billing/账户余额，并检查网关限流、自动重试和模型回退策略。**本项目不自动重试，网关也应关闭自动重试和付费回退**。
+3. 将 `AI_GATEWAY_ID` 改为真实 Gateway ID；保留 `ai.binding = AI`，不需要在 Worker 保存 Cloudflare REST API Token。
+4. 应用迁移（已有数据先备份）：
+   ```sh
+   npx wrangler d1 migrations apply get-news --remote
+   ```
+5. 配置搜索 secret：
+   ```sh
+   npx wrangler secret put TAVILY_API_KEY
+   ```
+6. 保持 `SEARCH_ENABLED=false`、`JEV_ENABLED=false`、`DIGEST_ENABLED=false`、`FEEDBACK_ENABLED=false`，由负责人执行 `npm run deploy`。访问 `/`、`/health` 和 `/api/news`，验证数据库迁移和只读页面。
+7. 审核兴趣和费用授权后，在 `wrangler.jsonc` 中设置相应开关为 `true` 并重新部署。启用搜索会发送查询词给 Tavily；启用 Jev 会把新闻摘要、固定画像、频道规则和相关历史反馈交给模型服务。日报主模型也会收到新闻摘要、固定画像和历史事件简述。
 
-除 GET `/health` 和公开静态页面 `/admin`、`/admin/`、`/admin.js`、`/admin.css` 外，所有请求必须包含 `Authorization: Bearer <ADMIN_TOKEN>`。API 不开放 CORS；勿把管理 Token 放在浏览器前端包或公开链接中。
+生产配置应以版本控制中的 `wrangler.jsonc` 为准，避免后续 Git 构建覆盖 Dashboard 临时变量。`.dev.vars` 不会自动上传为生产 secrets。
 
-- `PUT /api/sources`：创建/更新来源；`enabled: false` 暂停。
-- `PUT /api/users`：创建/更新兴趣和推送策略；明确修改偏好立即影响后续判断，尚未发送且使用旧兴趣判断的消息会被抑制。
-- `GET /api/sources`、`/api/users`：查看配置和来源健康。
-- `POST /api/run`：运行一个批次。若 LLM 开启会产生真实推理费用，若推送开启会发送真实消息。
-- `GET /api/articles`、`/api/decisions`、`/api/outbox`：各返回最近 100 条。
-- `GET /api/status`：最近运行状态、任务积压及开关状态；不返回凭证。
+### Cloudflare 拉取 Git 自动部署
 
-来源示例：
+首次资源、迁移和 secret 配好后，在 Workers Builds 连接 GitHub 仓库，选择 `main`：
 
-```json
-{"id":"cloudflare","name":"Cloudflare Blog","kind":"rss","url":"https://blog.cloudflare.com/rss/","enabled":true}
-```
+- 安装：确保包含 devDependencies，例如 `npm ci --include=dev`。
+- 构建命令：`npm run check && npm run build`。
+- 部署命令：`npx wrangler deploy`。
+- 构建环境使用 Node.js 24（测试使用 `node:sqlite`）。
 
-用户示例：
+之后推送会自动部署，**不要在首次授权前接通带收费开关的自动部署**。Git 部署不自动应用 D1 迁移，新增迁移仍需负责人先执行。仓库 GitHub Actions 仅验证，不部署。
 
-```json
-{
-  "id":"owner","name":"Owner",
-  "interests":["AI 模型与开发工具的重要发布、价格及 API 变化"],
-  "excludedTopics":["营销抽奖","未经证实的传闻"],
-  "minScore":75,"minConfidence":0.75,"dailyLimit":3,
-  "timezone":"Asia/Shanghai","quietStart":22,"quietEnd":8,"enabled":true
-}
-```
+### 变量
 
-`quietStart == quietEnd` 表示无安静时段，默认 22:00–08:00；Cron 使用 UTC，但推送额度按用户当地日期计算。`dailyLimit: 0` 表示不发送。最多 10 个用户配置、20 个来源（数据库原子约束），不是面向不可信多租户的 SaaS。
+| 变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `SEARCH_ENABLED` | `false` | 定时 Tavily 搜索 |
+| `JEV_ENABLED` | `false` | Jev 评估队列 |
+| `AI_GATEWAY_ID` | 占位值 | 同账户 Gateway |
+| `NEWS_TIMEZONE` | `Asia/Shanghai` | 排期及日/月预算时区 |
+| `NEWS_MORNING_HOUR` | `7` | 晨间起始小时，0–7，窗口 3 小时，避免与小时刷新重叠 |
+| `TAVILY_DAILY_CREDITS` | `36` | 搜索日预算，允许设 0 |
+| `TAVILY_MONTHLY_CREDITS` | `950` | 搜索月预算，代码硬上限 1000 |
+| `JEV_DAILY_REQUESTS` | `360` | Jev 日请求上限，覆盖新增候选的处理空间 |
+| `JEV_MONTHLY_REQUESTS` | `10000` | Jev 月请求上限，不等于金额预算 |
+| `TAVILY_API_KEY` | secret | Tavily 凭证 |
+| `DIGEST_ENABLED` | `false` | 日报生成开关 |
+| `DIGEST_MODEL` | 空 | 必须明确设置兼容的 `provider/model`、`@cf/author/model` 或 `dynamic/route`；生产已选择 DeepSeek V4.1 Flash |
+| `DIGEST_HOUR` | `9` | 每天一期的生成小时，使用用户时区 |
+| `DIGEST_MONTHLY_REQUESTS` | `31` | 主模型月尝试上限，0–31 |
+| `FEEDBACK_ENABLED` | `false` | 本人反馈写入开关 |
+| `ACCESS_TEAM_DOMAIN` | 空 | 固定 Team 域名，不能是任意 JWKS URL |
+| `ACCESS_AUD` | 空 | 反馈路径的 Access 应用 Audience Tag |
+| `FEEDBACK_ALLOWED_EMAILS` | secret | 反馈账号邮箱白名单 |
 
-## 企业微信群快讯与静态中台
+主模型使用同一 `AI` binding 与 Gateway，需配置该模型的计费或可用供应商凭证。仅支持 OpenAI chat-completions 格式响应，非流式、`temperature:0`、最多 4096 输出 tokens，不保证所有供应商参数兼容。生产 `@cf/deepseek-ai/deepseek-v4.1-flash-1017` 已查询实时 schema 并真实验收，使用 `max_completion_tokens`、`reasoning_effort:none`、JSON object 模式；其他兼容模型沿用 `max_tokens`。没有默认收费模型，启用前须明确模型和费用授权。
 
-当前接入的是**企业微信群机器人 webhook**，不是企业微信自建应用（不需要 CorpID/应用 Secret）。机器人 Webhook URL 中含 `key`，整个 URL 都是密钥。先在目标群创建机器人，将 URL 保存在本地 `.dev.vars` 或 Worker secret，切勿放进页面、提交 Git 或发到公开聊天。
+## 可靠性、安全与运维
 
-```env
-PUSH_PROVIDER=wecom
-WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的密钥
-PUSH_ENABLED=true
-```
+- 搜索与模型请求前 D1 原子预留预算，失败、超时和崩溃不退回。次数限制不等于金额限制，请同时设置供应商账户费用上限。Tavily 免费额度为账号共享，其他项目不在本地账本内。
+- Jev 单次 15 秒，主模型传输上限 30 秒；超时后远端可能仍完成并计费，不自动重发。绑定不提供这里可用的远端取消保证。
+- 新闻与日报公开只读；唯一写入口是 Access 认证的反馈，无 `ADMIN_TOKEN`、无公开管理操作、无 CORS。`/health` 只证明 HTTP 入口响应。
+- 来源 URL 使用公共 HTTPS 检查，拒绝重定向；Tavily 响应限 1 MB。正文按纯文本渲染，严格 CSP，无第三方 CDN。
+- 只发布明确投影的新闻字段，不发布画像、查询、原始模型输出、预算或错误详情。新闻页面是公开的；需要私密阅读时应另加 Cloudflare Access，而不是管理 Token。
+- Jev 与日报 Gateway 请求均设置 `collectLog:true`、`skipCache:true`。Gateway 可能保留新闻、画像及反馈输入和模型输出，请按本人需求管理网关访问权限与保留期。Worker 同时记录脱敏后的原始错误名称、消息、错误码、状态码和请求 ID（若上游提供）；Jev 错误另存私有 `site_attempts.diagnostic_json`，不暴露给公开 API。
+- 最小 Jev 验证：应用迁移 `0011_model_diagnostics.sql` 后，临时配置 `JEV_SMOKE_TEST_ID=当前本地日期:唯一测试标识` 并部署。下一次原有 Cron 只发送一个合成状态、一个 Noul 问题；调用前预留通常的 Jev 日/月预算，结果或脱敏异常保存在 `site_attempts`。同一标识不重复执行，失败/超时不自动重试。不需要开启搜索/Jev 队列/日报开关，不读取画像或真实新闻。测试结束移除此临时变量并部署。
+- Tavily 认证/配置/额度错误会暂停搜索，需修复后用受信 SQL 清除 `site_provider_state` 对应行；429/暂时错误至少暂停 30 分钟。异常 basic 消耗超过 1 credit 会按报告记账并暂停，待人工排查。
+- 失败不覆盖已有入选内容；运维查 `site_runs`、`site_attempts`、`site_candidates`、`site_provider_state` 和 `site_digest_attempts`。不通过公开接口暴露完整运行日志。
+- 尚未自动清理历史记录，长期运行需要制定保留策略并监控 D1；不承诺全量新闻覆盖、准确的语义去重或事实核验。
 
-部署时通过 `npx wrangler secret put WECOM_WEBHOOK_URL` 设置 URL，并在 Worker 环境变量中明确设置 `PUSH_PROVIDER=wecom`、`PUSH_ENABLED=true`。`.dev.vars` 只用于本地，不会自动变成生产配置。本次代码不自动部署或发送真实消息。
-
-- Tavily 采集需要 `SEARCH_ENABLED=true`、`SEARCH_PROVIDER=tavily` 和 `TAVILY_API_KEY`；判断需要正确配置 `LLM_*` 并开启 `LLM_ENABLED=true`。启用前明确模型、搜索预算与群目标。
-- 必须先应用 D1 迁移并创建启用的用户兴趣配置。没有用户兴趣不会自动替你搜索十个领域。可通过管理 API 创建用户，或编辑后运行本地示例 seed。
-- 快讯复用已有发件箱、当地日期额度、静默时段、冷却、画像版本检查。不是影子模式：满足条件且开关开启就真实发送。
-- 单条文本消息不超过 2048 UTF-8 字节，带原文链接，无主动 @成员。仅 HTTP 成功且 `errcode=0` 才记 sent；业务拒绝记 failed；超时、5xx、畸形响应记 uncertain，均不自动重发。
-- 企业微信群机器人不保证识别 `Idempotency-Key`，不能依赖它实现服务端去重。结果不确定时先人工核查群消息；不要直接重放。
-- 当前所有用户共用一个群 webhook，**只应配置属于这个群的用户**，不是按用户分群路由。同一新闻对不同用户仍可能各推一次，建议先只启用一个 owner。
-- 搜索仍是现有半小时槽位、每槽一个专题轮转，不是十个领域每半小时各搜索一次。首次专题搜索仅建基线；没有可靠日期的结果不推送。不会保证立即有消息。
-- **每天早报汇总与定时发送仍未实现**；当前页面与机器人用于新闻查看和即时快讯。
-
-启动 `npm run dev` 后访问终端显示的本地地址加 `/admin`（通常 `http://localhost:8787/admin`）；部署后访问 Worker 同域 `/admin`。这是静态 HTML/CSS/JS 页面，无前端框架、无第三方 CDN，可查看状态、新闻、判断、发件箱、搜索记录和兴趣配置（只读）。新闻正文按纯文本渲染，避免 HTML 注入。
-
-页面只在手动输入管理 Token 后请求受保护 API。Token 仅保存在当前页内存，不进入 URL、静态资源、localStorage 或 cookie；刷新或断开后需要重新输入。页面外壳可公开访问，不代表新闻数据公开。使用可信设备及 HTTPS（本地开发除外），不要把管理 Token 配到前端构建参数里。
-
-“手动运行一轮”有费用与真实发送确认；普通查看/刷新不会触发采集或发送。断开页面不能撤回已启动的服务器任务。不存在绕开发件箱的“测试发送”按钮。
-
-## 固定新闻评分画像
-
-`src/llm/editorial-profile.ts` 保存站点所有者确认的固定评分背景，以 `fixedEditorialProfile` 注入当前新闻评审请求。包含核心/次要兴趣、相关设备背景、选材偏好与降权提示；不包含家人姓名、职业、未确认的性格推测或采集排期。该背景会随新闻交给配置的模型服务，请仅用于此个人新闻站。
-
-当前显式用户配置和排除规则优先于固定背景；降权不等于硬排除，采集频率不作为重要性或置信度。技术、游戏、数码和足球分别按兴趣价值判断。画像不是新的搜索计划，不改变现有确定性筛选、通知策略，也不代表已接入 Jev 或日报生成。
-
-## LLM 与推送接入
-
-自行选择 OpenAI-compatible 模型提供商和精确模型 ID，设置以下 **Worker secrets**，不要提交到 Git：
-
-- `ADMIN_TOKEN`
-- `LLM_API_KEY`
-- `PUSH_WEBHOOK_URL`（如果 URL 自带 token，也当 secret 保存）
-- `PUSH_WEBHOOK_TOKEN`（可选 Bearer 认证）
-
-`LLM_BASE_URL` 例如提供商的 `/v1` 根地址，适配器会附加 `/chat/completions`；`LLM_MODEL` 必须明确配置，没有默认收费模型。接口要求支持非流式 `response_format: json_object`、`max_tokens`，不兼容的模型会失败关闭，不会静默降级。
-
-确认提供商、用量预算后开启 `LLM_ENABLED=true`，先保持 `PUSH_ENABLED=false`，检查 `/api/decisions` 和 `/api/outbox`。确认接收渠道、目标与 payload 后再开启 `PUSH_ENABLED=true`。**只关闭推送并不意味着没有模型费用。** 原新闻摘要和兴趣会发给所选模型提供商；不要把隐私信息放入兴趣或订阅源。
-
-Webhook payload：
-
-```json
-{
-  "version":1,"id":"owner:<article-sha256>","type":"news.alert","userId":"owner",
-  "article":{"id":"<article-sha256>","title":"原始标题","url":"https://source.example.com/news","publishedAt":"2026-11-09T00:00:00.000Z"},
-  "decision":{"important":true,"shouldPush":true,"score":90,"confidence":0.95,"reason":"与你的兴趣相关的理由","summary":"简短摘要","topics":["AI"]}
-}
-```
-
-原文链接始终来自经过校验的 feed，不采用模型编造的链接。若将文本送到 HTML、Markdown 或其他聊天系统，接收方必须按自己的输出格式转义。
-
-## 去重、可靠性与成本边界
-
-- 以规范化 URL 的 SHA-256 为文章 ID，去掉 fragment、utm_*、fbclid、gclid；保留其他业务查询参数。同一用户同一文章只建一条判断和一条发件箱记录。
-- 初次抓取仅判断最近 24 小时的有日期条目；无日期旧条目只建基线。后续出现的新无日期条目按发现时间处理。Feed 自报时间没有独立验证。
-- 每轮最多检查 10 个到期源，每源处理最新 40 条；超过 10 个持续活跃来源可能需要额外一轮，突发超过 40 条可能遗漏，不能承诺全量覆盖。高流量场景应增加分页/队列而非无限提高上限。
-- 每轮最多 8 次模型判断（包括重试）；单次 15 秒、最多 600 输出 token。失败指数退避，最多 3 次；过期积压在选取任务前批量清理。模型自报 confidence 只是筛选信号，不是统计校准的真实性概率。
-- Cron 每 20 分钟。满负荷理论上可产生 **576 次模型尝试/天**；这只是请求上限，不是货币预算，请在提供商侧设置费用限制。
-- 每轮最多 5 次推送尝试；每用户默认每日 3 次。失败和结果不确定也占用当天额度，避免故障重试刷屏。额度不足/安静时段延后，发送前重新检查文章时效。
-- D1 租约阻止重叠批次，模型任务有独立 claim token。判断落库和创建 outbox 是原子批次；发送前事务式预留额度。
-- webhook 2xx 记为 sent，只代表接收端接受，不保证最终用户已读。4xx 记 failed；5xx、超时、重定向、发送中崩溃记 uncertain。**不自动重发 uncertain/failed**，先查接收端再人工处理。这是避免重复的保守策略，不承诺网络上的 exactly-once。
-- 来源失败分别退避，不阻塞其他来源。页面无需每次都产生通知，空结果完全静默。
-- 目前不自动删除历史文章/审计记录；长期运行需要增加保留策略及 D1 存储监控。
-
-## 安全约束
-
-HTTP 只接受无用户名密码的公共 HTTPS URL、443 端口，阻断私网 IP/本地主机字面值、拒绝重定向。RSS 响应限 1 MB，拒绝 XML DTD/实体声明，清理 HTML。模型输入、JSON 输出和 webhook 响应均限长，配置读取需要管理密钥。
-
-Workers 中无法可靠预先解析 DNS 并证明最终目标公网，因此**仅可信管理员配置来源和服务地址**；不要暴露任意 URL 抓取给普通用户。生产可进一步限制源主机名单。当前为保守起见拒绝 IPv6 字面地址。需要登录、反爬或浏览器渲染的来源不在第一版范围内。
-
-只记录错误分类，不落原始 HTTP 错误、Authorization 或密钥。D1 内有用户兴趣与新闻判断，管理接口也不适合公开分享。
-
-## 部署（未自动执行）
-
-1. 在你自己的 Cloudflare 账户创建 D1：`npx wrangler d1 create get-news`，把真实 ID 填入配置。
-2. `npx wrangler d1 migrations apply get-news --remote`。
-3. 配置 Worker secrets 和明确的模型/推送目标。先保持两个开关关闭。
-4. `npm run deploy`，再通过管理 API 添加来源和用户，检查采集结果。
-5. 分别启用模型与推送，在实际渠道验证消息、重复抑制和时区；勿只看 dry-run 构建就当作上线成功。
-
-仓库 CI 只做安装、类型检查、离线测试和打包，不自动部署，不持有生产密钥。
-
-## 用户画像与 Agent 工具
-
-画像独立保存在 D1：原有 `interests/excludedTopics` 保留，新增版本号 `revision` 和 `preferences`。明确偏好包括主题、来源的 `prefer / less / exclude / digest`；推断兴趣单独记录为 `inferredTopics`（权重 -0.25～0.25，仅给判断模型作为弱提示，不覆盖明确规则）。`delivery` 为 `alert / digest / paused`，另有冷却间隔、每日上限、静默时段。
-
-**更新前先运行新增迁移**（先在本地验证并备份远端数据库，再自行部署）：
-
-```bash
-npx wrangler d1 migrations apply get-news --local
-# 确认目标 Cloudflare 账号和数据库后，由部署者运行：
-npx wrangler d1 migrations apply get-news --remote
-```
-
-0002 为已有用户补充默认画像和只追加的变更历史；0003 增加可信来源主题标签和冷却时间索引/字段。旧画像默认行为不变。所有迁移均增量，不清空新闻或用户。
-
-### 接入你的对话 Agent
-
-新闻判断 LLM **仍然没有工具**，不会根据新闻正文修改用户画像。对话 Agent 才能获得以下独立 API。为它配置长度至少 32 的独立 secret `PROFILE_AGENT_TOKEN`，以及普通变量 `PROFILE_AGENT_USER_ID=owner`。这个凭据只能访问绑定用户的画像，不能操作来源、其他用户、运行任务或查看全站记录。管理员 token 仍可维护所有用户。
-
-```bash
-npx wrangler secret put PROFILE_AGENT_TOKEN
-```
-
-在 Cloudflare 的 Worker 设置或 `wrangler.jsonc` 的 `vars` 中填写 `PROFILE_AGENT_USER_ID`。不要把管理员密钥、模型密钥、推送密钥交给对话模型，也不要在提示词中直接嵌入任何凭据；由工具执行器注入 Authorization header。
-
-| API | 用途 |
-| --- | --- |
-| `GET /api/profiles/owner` | 当前完整画像与版本 |
-| `GET /api/profiles/owner/history` | 最近 50 条变更，包含修改前后、原因、反馈原文和操作者 |
-| `GET /api/profiles/owner/tools` | 可注册到 Agent 的 function tool 定义 |
-| `POST /api/profiles/owner/tools` | 执行 `{ "name": "get_profile", "arguments": {} }` 等工具调用 |
-| `POST /api/profiles/owner/changes` | 提交结构化修改 |
-| `POST /api/profiles/owner/undo` | 撤销最近一次变更 |
-| `GET /api/profiles/owner/collection-plan` | 预览该用户对已注册来源的采集需求 |
-
-所有上述 API 都要求 `Authorization: Bearer <token>`；POST 要求 JSON、最大 16 KiB。提供 `get_profile / update_profile / list_profile_changes / undo_profile_change / preview_collection_plan` 五个工具。接口已经可用，但本仓不内置聊天机器人或多轮 Agent；把定义注册到你的 Agent，再由执行器转发工具参数即可。
-
-例：用户明确要求少看加密货币新闻、每小时最多一次提醒：
-
-```json
-{
-  "expectedRevision": 0,
-  "changeId": "feedback-20261109-001",
-  "reason": "用户明确调整内容与提醒频率",
-  "evidence": "加密货币的少推一点，提醒至少隔一小时",
-  "operations": [
-    { "op": "set_topic", "topic": "加密货币", "mode": "less" },
-    { "op": "set_settings", "settings": { "cooldownMinutes": 60 } }
-  ]
-}
-```
-
-- `expectedRevision` 必须与读取版本一致；冲突返回 409，重新读取后重新决定，禁止盲目覆盖。
-- `changeId` 是客户端稳定唯一 ID；相同请求重试不会重复更新，不同参数复用 ID 返回 409。
-- `reason/evidence` 必填。审计是模型/调用者提供的解释，不代表系统能证明用户确实说过这句话；可信对话层应只提交用户授权的变化。不要写入凭据或无关敏感信息。
-- 单次点踩不自动永久屏蔽领域；无回复不作为负反馈。减少推荐用 `less`，明确“不再看”才用 `exclude`。模型推断只使用独立的弱兴趣字段。服务端不会从点击或沉默自动学习。
-- 撤销请求将 `operations` 替换为 `targetChangeId`。仅允许撤销当前最新变更，并产生新版本、保留历史，不会擦除记录或重新发送消息。
-- 旧 `PUT /api/users` 现在仅创建用户；对已有用户返回 409，请迁移更新调用至版本化接口。
-
-### 采集与推送策略
-
-来源仍由管理员通过 `PUT /api/sources` 注册，不允许模型提交任意抓取 URL。来源可增加 `topics: ["AI", "开发工具"]` 标签。明确偏好影响已注册可信来源的 20/60/180 分钟采集计划；多个用户共享同一来源时取最快需求，故个人预览不等于全局最终抓取间隔。实际检查仍由 20 分钟 Cron 驱动，失败来源保留退避策略。
-
-判断模型接收画像；明确排除/日报/暂停规则还会在服务端再检查。待发候选优先考虑分数与明确偏好，遵守每日预算、静默时间与冷却间隔，而不是见到一条就抢占全部名额。这里只在有限待发候选内比较，不引入额外 LLM 排名费用。
-
-画像每次修改都会在同一事务抑制旧的 pending 消息；发送预订还会核验当前版本，防止旧偏好发送。已预订、正在发送的外部请求不能撤回，已发送/结果不确定的记录不会重放。历史新闻不会因为撤销或改偏好自动补发。
-
-**本版边界：** `digest` 只保留日报候选、不推即时快讯；日报定时汇总与发送尚未实现。没有向量库、兴趣自动衰减、点击反馈采集、自动扩充来源或聊天前端。先让画像更新、审计、来源计划与推荐闭环可用，不额外增加模型调用成本。
-
-## 个性化新闻搜索（Tavily / Cloudflare）
-
-搜索是 RSS 的补充，不替代订阅。默认 `SEARCH_ENABLED=false`，没有真实 API 调用或自动双搜。
-启用前先应用 `0004_search.sql`（先本地验证、备份生产 D1，再由部署负责人操作）。本次没有自动部署。
-
-- `SEARCH_PROVIDER=tavily`：固定 News + basic，关闭自动参数升级、答案、正文抽取和图片，一次一个专题，最多 10 条，预留 1 credit。
-- `SEARCH_PROVIDER=cloudflare`：调用官方 Web Search REST，固定 **Ceramic**，最多 10 条。不是 Tavily News 的等价新闻索引，不假定结果有发布日期，也不比较两家的相关性分数。CF 是另行计费服务，`credits=0` 仅指没有 Tavily credits，不代表免费。
-- 专题从每个启用用户的显式 `interests`、topics 偏好生成；相同专题合并请求，共享结果。排除和暂停生效，prefer 最快 30 分钟，默认 60 分钟，less/digest 180 分钟。轮流处理最久未查询的到期专题，每次最多一个，最多 30 个规范化专题。更多专题会截断，应保持少量清晰类别。
-- 推断兴趣、用户名字和反馈证据不外发。但显式兴趣本身仍可能包含隐私：**开启搜索前请审核兴趣标签并授权将其交给选定提供商**。模型修改画像后，下个槽位自动重算计划。
-- 默认上海时区 `SEARCH_TIMEZONE=Asia/Shanghai`，08:00 到 22:00（含两端）每半小时，29 槽/日。Cron 改成每 10 分钟唤醒，RSS 仍按原有 20 分钟或画像计划独立采集；仅 00/30 分钟可能搜索。重复 Cron / 手动 `/api/run` 不增加同槽请求，错过不补跑。通知静默时间仍独立控制。
-- `TAVILY_DAILY_CREDITS=29`、`TAVILY_MONTHLY_CREDITS=900`；CF 使用独立 `CF_SEARCH_DAILY_REQUESTS=29`、`CF_SEARCH_MONTHLY_REQUESTS=900`。每次请求前 D1 原子预留；失败、超时、崩溃均计入且不退款。不自动重试。31 天最多 899 次，免费额度是 Tavily **账号级**，其他项目消耗不在本地账本，务必同时设供应商限额。日/月按所配时区计算。
-- 401/403/配置错误暂停直到管理员修正；429/暂时错误至少等待下个半小时（尊重 Retry-After），配额错误保守暂停到下月。修改 secret 后管理员 `POST /api/search/resume` 清除暂停，不清预算或重放旧槽。
-- 首次专题查询只建立基线；后续只有明确且新鲜的日期可进入提醒判断。缺日期、旧日期、未来日期只供发现/查看，不推送。CF 通常无发布日期，因此当前默认仅发现用途，不能虚构日期来制造“实时新闻”。
-- canonical URL 与已有 RSS 文章统一去重，judgment/outbox 继续复用既有防重。`search_attempts` 记录查询、来源、保留额度、响应 request ID、状态；`search_results` 保留名次、日期和文章关联。RSS 首次无日期基线规则不变；已存在 RSS 文章的来源/日期不会被搜索覆盖；搜索发现的未提醒文章可由后续明确新鲜日期的 RSS 升级，避免搜索结果阻断 RSS 提醒。
-
-配置：Tavily 用 `wrangler secret put TAVILY_API_KEY`；CF 用 `CF_ACCOUNT_ID`、`wrangler secret put CF_SEARCH_API_TOKEN`，可选 `CF_SEARCH_GATEWAY_ID`。CF token 权限按官方 Web Search 指南的 Workers AI Read / AI Gateway Read，勿用 Global API Key。不要提交 `.dev.vars`。两家只启用选中的一家，不自动回退收费。
-
-管理员 `GET /api/search` 查看有效专题、近 100 次调用及暂停状态；画像代理只能通过自己的 `collection-plan` 查看自己专题，不能操作预算、secret、全局查询记录或恢复接口。
-
-未来对照可用统一 `SearchProvider.search({query,maxResults:10})` 运行同查询、同时间窗的独立离线评测：目前没有自动 A/B 或双倍请求，结果质量与时效需真实样本验证。不要把 CF 缺失日期当搜索失败，也不要把 Tavily/CF 分数横比。
-
-官方依据：[Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[CF Web Search 使用](https://developers.cloudflare.com/web-search/how-to-use/)、[CF providers](https://developers.cloudflare.com/web-search/providers/)。接口通过 mock 测试，未使用真实 key 付费验证。
+官方接口依据：[Jev](https://developers.cloudflare.com/ai/models/typesafe/jev-1.14.0/)、[AI binding / Gateway](https://developers.cloudflare.com/ai-gateway/usage/worker-binding-methods/)、[Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search)。适配器已通过 mock 测试，尚未经真实付费调用验收。
