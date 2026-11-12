@@ -35,7 +35,7 @@ describe('immutable daily digests and cited event grouping', () => {
     expect(issue?.stories).toHaveLength(1); expect(issue?.stories[0].sources).toHaveLength(2);
     expect(issue?.stories[0].sources[0]?.url).toContain('news.example.com');
     const [system, input] = model.complete.mock.calls[0] as [string, any];
-    expect(system).toContain('UNTRUSTED DATA'); expect(system).toContain('SAME event'); expect(input.fixedEditorialProfile.version).toBe(1);
+    expect(system).toContain('UNTRUSTED DATA'); expect(system).toContain('SAME event'); expect(input.fixedEditorialProfile.version).toBe(2);
     expect(input.articles[0].url).toBeUndefined(); // model cites IDs, never supplies links
     await store.run("UPDATE site_news SET title='Changed source title',summary='Changed summary'");
     await store.run("UPDATE site_topics SET guidance='Changed profile'");

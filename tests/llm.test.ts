@@ -34,7 +34,7 @@ describe('offline configurable LLM judge', () => {
     await createJudge(config, fetcher).evaluate(item, profile);
     const request = JSON.parse(fetcher.mock.calls[0][1].body);
     const input = JSON.parse(request.messages[1].content);
-    expect(input.fixedEditorialProfile.version).toBe(1);
+    expect(input.fixedEditorialProfile.version).toBe(2);
     expect(input.fixedEditorialProfile.coreInterests.map((entry: { topic: string }) => entry.topic)).toEqual([
       'AI 模型与产品进展', 'Agent 与 AI 开发实践', '任天堂与核心游戏资讯',
       '手机、数码与跨设备体验', '单机游戏新闻', '足球',
@@ -43,7 +43,9 @@ describe('offline configurable LLM judge', () => {
     expect(input.userCriteria.interests).toEqual(profile.interests);
     expect(request.messages[0].content).toContain('Current explicit user criteria and exclusions override this background');
     expect(request.messages[0].content).toContain('Collection frequency is not importance or confidence');
-    expect(JSON.stringify(input.fixedEditorialProfile)).not.toMatch(/悠悠|数学老师|周四|周日/);
+    expect(JSON.stringify(input.fixedEditorialProfile)).not.toMatch(/悠悠|数学老师|周四|周日|Xbox|XGP/i);
+    expect(input.fixedEditorialProfile.relevantContext).toContain('任天堂重度玩家');
+    expect(input.fixedEditorialProfile.coreInterests.find((entry: { topic: string }) => entry.topic === '单机游戏新闻').keywords).toContain('单机游戏');
   });
 
   it('keeps hostile article text in a separate JSON data field', async () => {
