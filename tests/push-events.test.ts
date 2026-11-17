@@ -20,13 +20,14 @@ async function setup() {
 }
 
 describe('transport-neutral high-interest push events', () => {
-  it('includes the exact 0.8 boundary and all qualifying articles, not just the top three', async () => {
+  it('excludes the exact 0.8 boundary and captures all qualifying articles', async () => {
     const { env, store, add } = await setup();
-    for (const [id, score] of [['a', .8], ['b', .81], ['c', .9], ['d', 1], ['low', .79999]] as const) await add(id, score);
+    for (const [id, score] of [['a', .8], ['b', .81], ['c', .9], ['d', 1], ['e', .95], ['low', .79999]] as const) await add(id, score);
     expect(await capturePushEvents(env, now)).toBe(4);
     const rows = await store.all<{ payload_json: string }>('SELECT payload_json FROM site_push_events');
     const events = rows.map(row => JSON.parse(row.payload_json));
-    expect(events.find(e => e.article.id === 'a')).toMatchObject({ version: 1, type: 'news.worth-reading', recipientId: 'owner', judgment: { version: 2, worthReading: .8 } });
+    expect(events.some(e => e.article.id === 'a')).toBe(false);
+    expect(events.find(e => e.article.id === 'b')).toMatchObject({ version: 1, type: 'news.worth-reading', recipientId: 'owner', judgment: { version: 2, worthReading: .81 } });
     expect(events.every(e => !('summary' in e.article) && !('feedback' in e))).toBe(true);
   });
   it('deduplicates across runs, batches and topics, preserving the original snapshot', async () => {

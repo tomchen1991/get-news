@@ -16,7 +16,7 @@ export interface PushEvent {
  * The caller MUST reserve a delivery in D1 and enforce recipient limits before send.
  * idempotencyKey is stable per event/recipient; it is not a promise of exactly-once delivery.
  * Throwing, timing out or losing the response means UNKNOWN, never automatic retry.
- * This module intentionally has no dispatcher, network calls or concrete adapter.
+ * This module has no network calls; message-center.ts owns concrete delivery.
  */
 export interface PushTransport {
   send(event: PushEvent, context: { idempotencyKey: string; signal: AbortSignal }): Promise<
@@ -30,6 +30,14 @@ export interface PushEventEnv {
   PUSH_EVENTS_ENABLED?: string;
   /** Explicit activation instant. Searches before this instant are never backfilled. */
   PUSH_EVENTS_SINCE?: string;
+  /** Strict lower bound on the 0–100 stored score. */
+  PUSH_MIN_SCORE?: string;
+}
+
+export function pushThreshold(env: PushEventEnv): number {
+  const value = Number(env.PUSH_MIN_SCORE ?? String(PUSH_THRESHOLD * 100));
+  if ((env.PUSH_MIN_SCORE !== undefined && !env.PUSH_MIN_SCORE.trim()) || !Number.isFinite(value) || value < 0 || value > 100) throw new Error('Invalid push threshold');
+  return value / 100;
 }
 
 /** Record intent independently of collection/judging and any eventual delivery transport.
@@ -42,6 +50,7 @@ export async function capturePushEvents(env: PushEventEnv, now = Date.now()): Pr
   const since = Date.parse(env.PUSH_EVENTS_SINCE ?? '');
   if (!Number.isFinite(since) || !env.PUSH_EVENTS_SINCE?.endsWith('Z')) throw new Error('Push events require an explicit UTC activation instant');
   if (since > now) return 0;
+  const threshold = pushThreshold(env);
   const store = new Store(env.DB);
   const rows = await store.all<{
     id: string; title: string; url: string; published_at: string;
@@ -54,15 +63,15 @@ export async function capturePushEvents(env: PushEventEnv, now = Date.now()): Pr
     JOIN site_topics t ON t.id=i.topic_id
     WHERE a.kind='search' AND a.id LIKE 'hourly:%' AND a.status='completed'
       AND a.started_at>=? AND a.started_at<=? AND c.status='accepted'
-      AND c.score>=80 AND c.score<=100 AND t.enabled=1
+      AND c.score>? AND c.score<=100 AND t.enabled=1
       AND NOT EXISTS (SELECT 1 FROM site_push_events e WHERE e.recipient_id='owner' AND e.article_id=n.id)
-    ORDER BY a.started_at,c.score DESC,n.id,i.topic_id LIMIT 100`, since, now);
+    ORDER BY a.started_at,c.score DESC,n.id,i.topic_id LIMIT 100`, since, now, threshold * 100);
   let created = 0;
   for (const row of rows) {
     let judgment: { version?: unknown; worthReading?: unknown };
     try { judgment = JSON.parse(row.evaluation_json); } catch { continue; }
     const score = judgment?.worthReading;
-    if (judgment?.version !== 2 || typeof score !== 'number' || !Number.isFinite(score) || score < PUSH_THRESHOLD || score > 1) continue;
+    if (judgment?.version !== 2 || typeof score !== 'number' || !Number.isFinite(score) || score <= threshold || score > 1) continue;
     let url: URL;
     try { url = new URL(row.url); } catch { continue; }
     if (url.protocol !== 'https:' || url.username || url.password || row.url.length > 4096 ||
