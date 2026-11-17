@@ -7,6 +7,7 @@ import { rollingUpdates } from './updates';
 import { dispatchManualIssue } from './manual';
 import { dispatchJevSmoke } from './smoke';
 import { capturePushEvents } from './push';
+import { dispatchMessageCenter } from './message-center';
 import { withWorkerPresence } from './worker-presence';
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': status === 200 ? 'public, max-age=60' : 'no-store', 'X-Content-Type-Options': 'nosniff' } });
 export async function handleSiteRequest(request: Request, env: SiteEnv): Promise<Response> {
@@ -51,10 +52,16 @@ export default {
   async scheduled(event: ScheduledController, env: SiteEnv, ctx: ExecutionContext) {
     ctx.waitUntil(withWorkerPresence(env, async () => {
       try { if (await dispatchJevSmoke(env)) return; } catch (error) { console.error('jev_smoke_dispatch_failed', String(error)); return; }
-      try { if (await dispatchManualIssue(env)) return; } catch { console.error('manual_issue_dispatch_failed'); return; }
+      try {
+        if (await dispatchManualIssue(env)) {
+          try { await dispatchMessageCenter(env); } catch { console.error('message_center_dispatch_failed'); }
+          return;
+        }
+      } catch { console.error('manual_issue_dispatch_failed'); return; }
       try { await runNewsSite(env, { scheduledAt: event.scheduledTime }); } catch { console.error('news_site_run_failed'); }
       try { await capturePushEvents(env); } catch (error) { console.error('push_event_capture_failed', String(error)); }
       try { await generateDailyDigest(env); } catch { console.error('digest_configuration_or_store_failed'); }
+      try { await dispatchMessageCenter(env); } catch { console.error('message_center_dispatch_failed'); }
     }));
   },
 } satisfies ExportedHandler<SiteEnv>;

@@ -4,7 +4,7 @@ Cloudflare Workers + D1 的个人新闻站：**定时搜索 → Jev 结构化评
 
 首版站点：<https://get-news.fzt-tom.workers.dev>（公开只读页面；采集、单次 Noul Jev 和日报生成已开启，反馈关闭。2026-11-11 日报已用 `@cf/deepseek-ai/deepseek-v4.1-flash-1017` 成功发布，正文 210 字、4 个事件附来源。运行记录见 [生产状态](docs/production-status.md)）。
 
-当前生产入口为 `src/site/index.ts`，不开放管理、画像修改、手动运行或推送接口，**不需要 ADMIN_TOKEN，不发送 webhook**。历史 MVP 代码与数据表暂留，但没有接入当前部署入口，说明见 [历史文档](docs/legacy-mvp.md)。
+当前生产入口为 `src/site/index.ts`，不开放管理、画像修改、手动运行或推送接口，**不需要 ADMIN_TOKEN**。支持可选的消息中心推送（默认关闭）：日报固定推、即时新闻默认仅推 >80 分，配置与交付语义见 [推送接入](docs/push-events.md)。历史 MVP 代码与数据表暂留，但没有接入当前部署入口，说明见 [历史文档](docs/legacy-mvp.md)。
 
 Worker 内热点 agent 的人物状态可独立上报采集服务，默认关闭；接线与运行边界见 [Worker agent 状态上报](docs/worker-presence.md)。
 

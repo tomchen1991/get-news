@@ -9,8 +9,9 @@ import { modelDiagnostic } from './diagnostics';
 import type { PushEventEnv } from './push';
 import { collectionSince, isNonNewsPage } from './source-policy';
 import type { WorkerPresenceEnv } from './worker-presence';
+import type { MessageCenterEnv } from './message-center';
 
-export interface SiteEnv extends AccessEnv, PushEventEnv, WorkerPresenceEnv {
+export interface SiteEnv extends AccessEnv, PushEventEnv, WorkerPresenceEnv, MessageCenterEnv {
   DB: D1Database;
   AI?: AiBinding;
   SEARCH_ENABLED?: string;
