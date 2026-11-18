@@ -73,6 +73,25 @@ Worker 内热点 agent 的人物状态可独立上报采集服务，默认关闭
 
 旧版四维 Noul 加权策略和判定结果仅作为历史记录保留，不自动重评、不重新解释旧分数、不改写已发布日报。新判断在 `evaluation_json` 中记录 `version:2`、原始 `worthReading` 与反馈版本。
 
+## 问新闻：对话搜索
+
+启用后，网站导航的「问新闻」打开 `/ask`。直接输入「昨天 TGA 年度游戏有哪些提名？」；主模型（`DIGEST_MODEL`）把问题改成具体搜索词和日期，Worker 自动调用 Tavily 并显示标题、摘要和原文链接。可以接着问「任天堂有哪些？」。页面保留本次会话，刷新会清空；最近三条已成功搜索的提问用于理解追问。结果是搜索摘要，不是模型核实后的答案，不经 Jev，不写入日报或推送。
+
+默认关闭。启用时先应用 `0016_news_chat.sql`，用同一个 Cloudflare Access 应用保护 `/ask` 和 `/api/news-chat`（如也启用反馈，可将 `/api/feedback*` 加入同一应用），配置 `ACCESS_TEAM_DOMAIN`、`ACCESS_AUD` 和 `FEEDBACK_ALLOWED_EMAILS`，再设置 `NEWS_CHAT_ENABLED=true`。无需启用反馈或日报生成开关，但需要 `DIGEST_MODEL`、AI Gateway 和 Tavily 密钥。每轮最多一次主模型、一次搜索；所有账号合计每日 5 轮、每月 60 轮，搜索还共享定时采集的 Tavily 额度。提问与上下文发送给主模型，关键词发送给 Tavily；Worker D1 只记用量、不存对话。
+
+### 命令行与代码调用
+
+热点 Agent 或本地脚本可以调用 `src/search/news-fetch.ts` 的 `fetchNews(provider, request)`，也可以执行非交互式命令获取 JSON。直接传具体事件关键词，不用等待定时采集：
+
+```bash
+npm run --silent news:fetch -- --env-file .dev.vars --from 2026-11-16 --to 2026-11-18 'The Game Awards nominations'
+npm run --silent news:fetch -- --env-file .dev.vars --domain thegameawards.com 'The Game Awards nominations'
+```
+
+可用 `--domain` 指定来源域名（最多 5 个，可重复传入该参数），默认搜最近一天，可用 `--from` / `--to` 指定日期（`--to` 需要 `--from`）。输出含标题、搜索摘要、原文链接、来源日期（未知为 `null`）和本次 credit 数；日期与摘要未经独立核验，空结果不代表事件未发生。
+
+每次调用只向 Tavily 发送一次 basic 新闻搜索，最多 10 条结果，不调用 Jev 或其他模型、不自动重试、不写 D1、不推送、不改日报。查询会发送给 Tavily，并使用所配置密钥所属账户的额度，不计入 Worker 的 D1 定时采集账本。独立命令不走网页对话接口。
+
 ## 中文日报与历史档案
 
 迁移 `0008_digests_feedback.sql` 增加日报、输入快照、引用来源和私人反馈表；`0009_rolling_news.sql` 增加小时搜索的候选成员关系。默认 `DIGEST_ENABLED=false`，必须明确选择 `DIGEST_MODEL` 才能启用。
@@ -117,7 +136,7 @@ Worker 内热点 agent 的人物状态可独立上报采集服务，默认关闭
 
 ### 配置 Cloudflare Access
 
-公开读页面仍不需要 `ADMIN_TOKEN`。反馈是唯一写入口，未配置以下内容时保持关闭：
+公开读页面仍不需要 `ADMIN_TOKEN`。反馈入口未配置以下内容时保持关闭：
 
 1. 在自定义域名创建 Access Self-hosted 应用，**保护 `你的域名/api/feedback*`**，包括 login/session 路由，只允许你的邮箱。不要配置 Bypass，也不要允许任意用户；在生产上逐一验证路径规则。
 2. 将 Team 域名（如 `team.cloudflareaccess.com`）和该应用的 Audience Tag 写入 `ACCESS_TEAM_DOMAIN`、`ACCESS_AUD`。
@@ -199,7 +218,7 @@ npm run dev
 
 - 搜索与模型请求前 D1 原子预留预算，失败、超时和崩溃不退回。次数限制不等于金额限制，请同时设置供应商账户费用上限。Tavily 免费额度为账号共享，其他项目不在本地账本内。
 - Jev 单次 15 秒，主模型传输上限 30 秒；超时后远端可能仍完成并计费，不自动重发。绑定不提供这里可用的远端取消保证。
-- 新闻与日报公开只读；唯一写入口是 Access 认证的反馈，无 `ADMIN_TOKEN`、无公开管理操作、无 CORS。`/health` 只证明 HTTP 入口响应。
+- 新闻与日报公开只读；反馈与问新闻接口需 Access 认证，无 `ADMIN_TOKEN`、无公开管理操作、无 CORS。`/health` 只证明 HTTP 入口响应。
 - 来源 URL 使用公共 HTTPS 检查，拒绝重定向；Tavily 响应限 1 MB。正文按纯文本渲染，严格 CSP，无第三方 CDN。
 - 只发布明确投影的新闻字段，不发布画像、查询、原始模型输出、预算或错误详情。新闻页面是公开的；需要私密阅读时应另加 Cloudflare Access，而不是管理 Token。
 - Jev 与日报 Gateway 请求均设置 `collectLog:true`、`skipCache:true`。Gateway 可能保留新闻、画像及反馈输入和模型输出，请按本人需求管理网关访问权限与保留期。Worker 同时记录脱敏后的原始错误名称、消息、错误码、状态码和请求 ID（若上游提供）；Jev 错误另存私有 `site_attempts.diagnostic_json`，不暴露给公开 API。

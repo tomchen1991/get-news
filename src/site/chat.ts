@@ -7,7 +7,7 @@ import { unwrapAiResponse } from './ai-response';
  * Accepts provider/model and @cf/author/model IDs with compatible chat schemas.
  * The selected Workers AI DeepSeek Flash schema is checked before configuration.
  */
-export function createGatewayChat(ai: AiBinding, gatewayId: string, model: string, maxTokens = 1200) {
+export function createGatewayChat(ai: AiBinding, gatewayId: string, model: string, maxTokens = 1200, collectLog = true) {
   if (!ai || typeof ai.run !== 'function' || !/^[a-zA-Z0-9_-]{1,64}$/.test(gatewayId) || !/^(?:@cf\/[a-zA-Z0-9_-]+|[a-zA-Z0-9_-]+)\/[^\s]{1,180}$/.test(model)) throw new Error('Invalid chat configuration');
   if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 4096) throw new Error('Invalid output limit');
   return { async complete(system: string, data: unknown): Promise<string> {
@@ -19,7 +19,7 @@ export function createGatewayChat(ai: AiBinding, gatewayId: string, model: strin
         ? { max_completion_tokens: maxTokens, reasoning_effort: 'none', response_format: { type: 'json_object' } }
         : { max_tokens: maxTokens };
       const raw = await Promise.race([
-        ai.run(model, { messages: [{ role: 'system', content: system }, { role: 'user', content }], stream: false, temperature: 0, ...limits }, { gateway: { id: gatewayId, skipCache: true, collectLog: true } }),
+        ai.run(model, { messages: [{ role: 'system', content: system }, { role: 'user', content }], stream: false, temperature: 0, ...limits }, { gateway: { id: gatewayId, skipCache: true, collectLog } }),
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Chat timeout')), 30000); }),
       ]);
       if (!raw || typeof raw !== 'object' || JSON.stringify(raw).length > 65536) throw new Error('Missing or oversized chat response');
@@ -32,7 +32,7 @@ export function createGatewayChat(ai: AiBinding, gatewayId: string, model: strin
       return message.content;
     } catch (error) {
       const diagnostic = modelDiagnostic(error);
-      console.error('gateway_chat_failed', JSON.stringify(diagnostic));
+      if (collectLog) console.error('gateway_chat_failed', JSON.stringify(diagnostic));
       throw new Error(`Gateway chat failed: ${diagnostic.message}`, { cause: diagnostic });
     }
     finally { clearTimeout(timer); }

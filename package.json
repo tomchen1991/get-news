@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "tui": "tsx scripts/tui.ts",
+    "news:fetch": "tsx scripts/news-fetch.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm test",

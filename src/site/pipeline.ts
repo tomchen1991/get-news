@@ -24,6 +24,7 @@ export interface SiteEnv extends AccessEnv, PushEventEnv, WorkerPresenceEnv, Mes
   TAVILY_MONTHLY_CREDITS?: string;
   JEV_DAILY_REQUESTS?: string;
   JEV_MONTHLY_REQUESTS?: string;
+  NEWS_CHAT_ENABLED?: string;
   DIGEST_ENABLED?: string;
   DIGEST_MODEL?: string;
   DIGEST_HOUR?: string;
@@ -48,6 +49,9 @@ function limit(raw: string | undefined, fallback: number, max: number) {
   const value = raw === undefined ? fallback : Number(raw);
   if (raw === '' || !Number.isSafeInteger(value) || value < 0 || value > max) throw new Error('Invalid budget');
   return value;
+}
+export function tavilyBudget(env: Pick<SiteEnv, 'TAVILY_DAILY_CREDITS' | 'TAVILY_MONTHLY_CREDITS'>) {
+  return [limit(env.TAVILY_DAILY_CREDITS, 36, 100), limit(env.TAVILY_MONTHLY_CREDITS, 950, 1000)] as const;
 }
 export function topicQueries(topic: Topic): string[] {
   const queries: unknown = JSON.parse(topic.queries_json);
@@ -86,7 +90,7 @@ export async function runNewsSite(env: SiteEnv, deps: { search?: SearchProvider;
   const clock = localClock(timely ? scheduledAt : start, env.NEWS_TIMEZONE);
   const hourly = !manual && timely && clock.hour >= 10 && clock.hour <= 20 && clock.minute === 0;
   const hour = limit(env.NEWS_MORNING_HOUR, 7, 7);
-  const dailySearch = limit(env.TAVILY_DAILY_CREDITS, 36, 100), monthlySearch = limit(env.TAVILY_MONTHLY_CREDITS, 950, 1000);
+  const [dailySearch, monthlySearch] = tavilyBudget(env);
   const dailyJev = limit(env.JEV_DAILY_REQUESTS, 360, 500), monthlyJev = limit(env.JEV_MONTHLY_REQUESTS, 10000, 15000);
   // Configure stages independently: a judge failure must not stop collection, nor
   // should a missing search credential prevent judging already queued candidates.

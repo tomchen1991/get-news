@@ -2,6 +2,9 @@ import { assertPublicHttpsUrl, fetchBounded } from '../http';
 import type { NewsItem } from '../types';
 
 export interface SearchQuery { query: string; maxResults?: number; startDate?: string; endDate?: string }
+export interface TavilySearchProvider extends SearchProvider {
+  search(request: SearchQuery & { includeDomains?: readonly string[] }): Promise<SearchResult>;
+}
 export interface SearchResult { items: NewsItem[]; requestId?: string; /** Tavily credits only; CF bills separately, not free. */ credits: number }
 export interface SearchProvider { search(request: SearchQuery): Promise<SearchResult> }
 export type SearchErrorCode = 'configuration' | 'invalid_query' | 'unauthorized' | 'quota' | 'rate_limit' | 'unavailable' | 'http' | 'transport' | 'invalid_response';
@@ -61,7 +64,7 @@ async function request(url: string, key: string, body: Row, fetcher: typeof fetc
 
 /** https://docs.tavily.com/documentation/api-reference/endpoint/search
  * No automatic retries, upgrades, extraction or answer generation. */
-export function createTavilySearchProvider(apiKey: string, fetcher: typeof fetch = fetch): SearchProvider {
+export function createTavilySearchProvider(apiKey: string, fetcher: typeof fetch = fetch): TavilySearchProvider {
   return { async search(input) {
     const { query, limit } = parameters(input);
     for (const date of [input.startDate, input.endDate]) {
@@ -69,13 +72,21 @@ export function createTavilySearchProvider(apiKey: string, fetcher: typeof fetch
     }
     if (input.endDate && (!input.startDate || input.endDate < input.startDate)) throw new SearchError('invalid_query');
     const window = input.startDate ? { start_date: input.startDate, ...(input.endDate ? { end_date: input.endDate } : {}) } : { time_range: 'day' };
-    const data = await request('https://api.tavily.com/search', apiKey, { query, topic: 'news', search_depth: 'basic', auto_parameters: false, ...window, max_results: limit, include_answer: false, include_raw_content: false, include_images: false, include_usage: true }, fetcher);
+    const domains = input.includeDomains?.map(domain => domain.trim().toLowerCase());
+    if (domains && (domains.length < 1 || domains.length > 5 || domains.some(domain =>
+      domain.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(domain)))) throw new SearchError('invalid_query');
+    const data = await request('https://api.tavily.com/search', apiKey, { query, topic: 'news', search_depth: 'basic', auto_parameters: false, ...window, ...(domains ? { include_domains: [...new Set(domains)] } : {}), max_results: limit, include_answer: false, include_raw_content: false, include_images: false, include_usage: true }, fetcher);
     if (!Array.isArray(data.results)) throw new SearchError('invalid_response');
     const reported = object(data.usage).credits;
     // Missing usage is conservatively charged one basic search. Never trust a
     // negative/zero usage value to replenish the caller's reservation.
     const credits = typeof reported === 'number' && Number.isFinite(reported) && reported >= 1 ? Math.ceil(reported) : 1;
-    return { items: normalize(data.results.slice(0, limit), 'content', 'published_date'), requestId: plain(data.request_id, 200) || undefined, credits };
+    const items = normalize(data.results.slice(0, limit), 'content', 'published_date').filter(item => {
+      if (!domains) return true;
+      const host = new URL(item.url).hostname;
+      return domains.some(domain => host === domain || host.endsWith(`.${domain}`));
+    });
+    return { items, requestId: plain(data.request_id, 200) || undefined, credits };
   }};
 }
 export interface CloudflareSearchOptions { accountId: string; apiToken: string; gatewayId?: string; provider?: 'ceramic' | 'exa' | 'linkup'; byokAlias?: string }
