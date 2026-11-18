@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { handleNewsChat } from '../src/site/news-chat';
 import { handleSiteRequest, NewsChatLoginLimiter } from '../src/site/index';
 import { handleNewsChatAuth } from '../src/site/news-chat-auth';
@@ -10,15 +10,9 @@ import { createDatabase } from './d1';
 const now = Date.parse('2026-11-18T01:00:00Z');
 const issuer = 'https://auth.falsita.cn', aud = 'news-client', origin = 'https://news.example';
 const session = 'a'.repeat(43), sessionCookie = `__Host-news-chat-session=${session}`;
-let privateKey: CryptoKey, jwk: JsonWebKey & { kid: string };
-const b64 = (data: object) => Buffer.from(JSON.stringify(data)).toString('base64url');
-const discovery = () => Response.json({ issuer, authorization_endpoint: issuer + '/auth', token_endpoint: issuer + '/token',
-  jwks_uri: issuer + '/jwks', userinfo_endpoint: issuer + '/me', revocation_endpoint: issuer + '/token/revocation' });
-beforeAll(async () => {
-  const alg = { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' };
-  const keys = await crypto.subtle.generateKey(alg, true, ['sign', 'verify']) as CryptoKeyPair;
-  jwk = { ...(await crypto.subtle.exportKey('jwk', keys.publicKey) as JsonWebKey), kid: 'test' };
-  privateKey = keys.privateKey;
+const loginPath = '/api/news-chat/login';
+const loginRequest = (code = '123456', source = origin, headers: HeadersInit = {}) => new Request(origin + loginPath, {
+  method: 'POST', headers: { ...Object.fromEntries(new Headers(headers)), Origin: source }, body: new URLSearchParams({ code }),
 });
 async function fixture() {
   const { db, close } = createDatabase();
@@ -75,19 +69,19 @@ describe('news chat', () => {
     expect(assign).toHaveBeenCalledExactlyOnceWith('/');
   });
 
-  it('returns the login limit before OIDC discovery or any D1 access', async () => {
+  it('returns the login limit before token exchange or any D1 access', async () => {
     const f = await fixture();
-    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => discovery());
+    const fetcher = vi.fn<typeof fetch>();
     const prepare = vi.spyOn(f.env.DB, 'prepare'), batch = vi.spyOn(f.env.DB, 'batch');
     const getByName = vi.fn(() => ({ fetch: async () => new Response(null, { status: 429, headers: { 'Retry-After': '42' } }) }));
     const env = { ...f.env, NEWS_CHAT_LOGIN_LIMITER: { getByName } as unknown as DurableObjectNamespace };
     try {
-      const response = await handleNewsChatAuth(new Request(origin + '/api/news-chat/login'), env, fetcher);
+      const response = await handleNewsChatAuth(loginRequest(), env, fetcher);
       expect(response.status).toBe(429);
       expect(response.headers.get('Retry-After')).toBe('42');
       expect(response.headers.get('Cache-Control')).toBe('no-store');
       expect(response.headers.has('Set-Cookie')).toBe(false);
-      expect(await response.json()).toEqual({ error: 'login_rate_limit' });
+      expect(await response.text()).toContain('尝试次数过多');
       expect(getByName).toHaveBeenCalledExactlyOnceWith('login');
       expect(fetcher).not.toHaveBeenCalled();
       expect(prepare).not.toHaveBeenCalled();
@@ -95,15 +89,14 @@ describe('news chat', () => {
     } finally { f.close(); }
   });
 
-  it('does not fall back to discovery or D1 when the login limiter is unavailable', async () => {
+  it('does not contact Auth or D1 when the login limiter is unavailable', async () => {
     const f = await fixture();
-    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => discovery());
+    const fetcher = vi.fn<typeof fetch>();
     const prepare = vi.spyOn(f.env.DB, 'prepare');
-    const request = new Request(origin + '/api/news-chat/login');
     try {
       f.reserveLogin.mockRejectedValueOnce(new Error('unavailable'));
-      expect((await handleNewsChatAuth(request, f.env, fetcher)).status).toBe(503);
-      expect((await handleNewsChatAuth(request, { ...f.env, NEWS_CHAT_LOGIN_LIMITER: undefined }, fetcher)).status).toBe(503);
+      expect((await handleNewsChatAuth(loginRequest(), f.env, fetcher)).status).toBe(503);
+      expect((await handleNewsChatAuth(loginRequest(), { ...f.env, NEWS_CHAT_LOGIN_LIMITER: undefined }, fetcher)).status).toBe(503);
       expect(fetcher).not.toHaveBeenCalled();
       expect(prepare).not.toHaveBeenCalled();
     } finally { f.close(); }
@@ -116,7 +109,7 @@ describe('news chat', () => {
     const bucket = async (ip?: string) => {
       const headers = new Headers({ 'X-Forwarded-For': '192.0.2.1', [loginSourceHeader]: 'f'.repeat(64) });
       if (ip) headers.set('CF-Connecting-IP', ip);
-      const request = new Request(origin + '/api/news-chat/login', { headers });
+      const request = loginRequest('123456', origin, headers);
       expect((await handleNewsChatAuth(request, env)).status).toBe(429);
       const sent = new Headers(fetchLimit.mock.lastCall![1].headers);
       expect(Array.from(sent.keys())).toEqual([loginSourceHeader.toLowerCase()]);
@@ -169,28 +162,22 @@ describe('news chat', () => {
     } finally { clock.mockRestore(); }
   });
 
-  it.each(['valid nonce', 'wrong nonce'])('handles OIDC login with %s, rejects replay, and revokes on logout for valid sessions', async mode => {
+  it('exchanges a same-origin TOTP for an owner session and revokes it on logout', async () => {
     const f = await fixture();
-    let nonce = '', challenge = '';
-    const tokenCall = vi.fn(), userinfo = vi.fn(), revoke = vi.fn();
+    const tokenCall = vi.fn(), revoke = vi.fn();
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
-      switch (new URL(String(input)).pathname) {
-        case '/.well-known/openid-configuration': return discovery();
-        case '/jwks': return Response.json({ keys: [jwk] });
+      const url = new URL(String(input));
+      expect(url.origin).toBe(issuer);
+      expect(init?.redirect).toBe('manual');
+      switch (url.pathname) {
         case '/token': {
           tokenCall();
-          const form = new URLSearchParams(String(init?.body));
-          expect(form.get('redirect_uri')).toBe(origin + '/api/news-chat/callback');
-          expect(form.get('code')).toBe('valid-code');
-          expect(new Headers(init?.headers).get('Authorization')).toBe('Basic ' + btoa('news%2Dclient:test%2Dsecret'));
-          expect(Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(form.get('code_verifier')!))).toString('base64url')).toBe(challenge);
-          const iat = Math.floor(Date.now() / 1000);
-          const token = `${b64({ alg: 'RS256', kid: 'test' })}.${b64({ iss: issuer, aud, sub: 'owner', nonce: mode === 'valid nonce' ? nonce : 'wrong', iat, exp: iat + 300 })}`;
-          const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', privateKey, new TextEncoder().encode(token));
-          return Response.json({ access_token: 'access', token_type: 'Bearer', expires_in: 300, id_token: `${token}.${Buffer.from(sig).toString('base64url')}` });
+          expect(init?.method).toBe('POST');
+          expect(new Headers(init?.headers).get('Authorization')).toBe('Basic ' + btoa('news-client:test-secret'));
+          expect(Object.fromEntries(new URLSearchParams(String(init?.body)))).toEqual({ code: '012345', scope: 'openid profile', grant_type: 'urn:falsita:params:oauth:grant-type:totp' });
+          return Response.json({ access_token: 'access', token_type: 'Bearer', expires_in: 300, refresh_token: 'never-store' });
         }
         case '/me':
-          userinfo();
           expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer access');
           return Response.json({ sub: 'owner' });
         case '/token/revocation':
@@ -200,36 +187,21 @@ describe('news chat', () => {
       }
     });
     try {
-      const login = await handleNewsChatAuth(new Request(origin + '/api/news-chat/login?next=https://other.example'), f.env, fetcher);
-      expect(login.status).toBe(303);
-      const target = new URL(login.headers.get('Location')!);
-      const state = target.searchParams.get('state');
-      nonce = target.searchParams.get('nonce')!;
-      challenge = target.searchParams.get('code_challenge')!;
-      expect(target.origin).toBe(issuer);
-      expect(target.searchParams.get('code_challenge_method')).toBe('S256');
-      expect(target.searchParams.get('scope')).toBe('openid profile');
-      const cookie = login.headers.get('Set-Cookie')!.split(';')[0];
-      const callback = (value: string) => new Request(`${origin}/api/news-chat/callback?code=valid-code&state=${value}&iss=${encodeURIComponent(issuer)}`, { headers: { Cookie: cookie } });
-      expect((await handleNewsChatAuth(callback('wrong'), f.env, fetcher)).status).toBe(400);
-      const result = await handleNewsChatAuth(callback(state!), f.env, fetcher);
-      if (mode === 'wrong nonce') {
-        expect(result.status).toBe(503);
-        expect(result.headers.get('Location')).toBeNull();
-        expect(result.headers.getSetCookie().every(value => !value.startsWith('__Host-news-chat-session='))).toBe(true);
-        expect(userinfo).not.toHaveBeenCalled();
-        expect((await handleNewsChatAuth(callback(state!), f.env, fetcher)).status).toBe(400);
-        expect(tokenCall).toHaveBeenCalledTimes(1);
-        return;
-      }
+      const login = await handleSiteRequest(new Request(origin + loginPath), f.env);
+      expect(login.status).toBe(200);
+      expect(login.headers.get('Referrer-Policy')).toBe('same-origin');
+      expect(await login.text()).toContain('action="/api/news-chat/login" method="post"');
+      expect((await handleSiteRequest(new Request(origin + '/api/news-chat/callback'), f.env)).status).toBe(404);
+      expect(fetcher).not.toHaveBeenCalled();
+      const result = await handleNewsChatAuth(loginRequest('012345'), f.env, fetcher);
       expect(result.status).toBe(303);
       expect(result.headers.get('Location')).toBe('/ask');
       expect(result.headers.get('Cache-Control')).toBe('no-store');
       const session = result.headers.getSetCookie().find(value => value.startsWith('__Host-news-chat-session='))!;
       expect(session).toMatch(/Path=\/; Max-Age=[1-9]\d*; HttpOnly; Secure; SameSite=Lax/);
       expect(session).not.toContain('access');
-      expect((await handleNewsChatAuth(callback(state!), f.env, fetcher)).status).toBe(400);
       expect(tokenCall).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(await f.env.DB.prepare('SELECT * FROM site_news_chat_sessions').all())).not.toMatch(/012345|never-store/);
       vi.stubGlobal('fetch', fetcher);
       const ask = new Request(origin + '/ask', { headers: { Cookie: session.split(';')[0] } });
       expect(await (await handleSiteRequest(ask, f.env)).text()).toContain('昨天 TGA 年度游戏有哪些提名');
@@ -243,6 +215,42 @@ describe('news chat', () => {
       expect((await handleSiteRequest(ask, f.env)).status).toBe(303);
       expect(f.reserveLogin).toHaveBeenCalledTimes(1);
     } finally { vi.unstubAllGlobals(); f.close(); }
+  });
+
+  it('rejects cross-origin and invalid login submissions before contacting Auth', async () => {
+    const f = await fixture();
+    const fetcher = vi.fn<typeof fetch>();
+    try {
+      for (const request of [loginRequest('123456', 'https://other.example'), loginRequest('123456', 'null'), loginRequest('123456', origin, { 'Sec-Fetch-Site': 'cross-site' })]) {
+        expect((await handleNewsChatAuth(request, f.env, fetcher)).status).toBe(403);
+      }
+      for (const code of ['12345', 'a'.repeat(257)]) expect((await handleNewsChatAuth(loginRequest(code), f.env, fetcher)).status).toBe(400);
+      expect(f.reserveLogin).not.toHaveBeenCalled();
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally { f.close(); }
+  });
+
+  it('fails closed for rejected or unavailable Auth and creates no session', async () => {
+    const f = await fixture();
+    const fetcher = vi.fn<typeof fetch>();
+    try {
+      fetcher.mockResolvedValueOnce(Response.json({ error: 'invalid_grant' }, { status: 400 }))
+        .mockResolvedValueOnce(Response.json({ error: 'unauthorized_client' }, { status: 400 }))
+        .mockResolvedValueOnce(Response.redirect('https://other.example', 307))
+        .mockRejectedValueOnce(new Error('network'))
+        .mockResolvedValueOnce(Response.json({ access_token: 'access', token_type: 'Bearer', expires_in: 900 }))
+        .mockResolvedValueOnce(Response.json({ sub: 'guest' }));
+      for (const status of [401, 503, 503, 503, 403]) {
+        const result = await handleNewsChatAuth(loginRequest(), f.env, fetcher);
+        expect(result.status).toBe(status);
+        expect(result.headers.get('Set-Cookie')).toBeNull();
+        expect(result.headers.get('Location')).toBeNull();
+        expect(await result.text()).not.toMatch(/123456|unauthorized_client/);
+      }
+      expect(await f.env.DB.prepare('SELECT COUNT(*) AS count FROM site_news_chat_sessions').first()).toEqual({ count: 1 });
+      expect(f.run).not.toHaveBeenCalled();
+      expect(f.search).not.toHaveBeenCalled();
+    } finally { f.close(); }
   });
 
   it('uses the main model to resolve a follow-up, executes one search and returns sources', async () => {
@@ -278,6 +286,28 @@ describe('news chat', () => {
       expect(f.run).not.toHaveBeenCalled();
       expect(f.search).not.toHaveBeenCalled();
     } finally { f.close(); }
+  });
+
+  it('rejects expired sessions on both routes without contacting Auth or news upstreams', async () => {
+    const f = await fixture();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 300_000);
+    vi.stubGlobal('fetch', f.deps.fetcher);
+    try {
+      const page = await handleSiteRequest(new Request(origin + '/ask', { headers: { Cookie: sessionCookie } }), f.env);
+      expect(page.status).toBe(303);
+      expect(page.headers.get('Location')).toBe(loginPath);
+      expect(page.headers.get('Set-Cookie')).toContain('Max-Age=0');
+      // Restore the expired row so the API exercises the expiry path, not just a missing session.
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(session));
+      await f.env.DB.prepare('INSERT INTO site_news_chat_sessions VALUES(?,?,?)').bind(Buffer.from(digest).toString('hex'), 'test-token', now + 300_000).run();
+      const api = await handleNewsChat(f.request(), f.env, { ...f.deps, now: now + 300_000 });
+      expect(api.status).toBe(401);
+      expect(api.headers.get('Location')).toBeNull();
+      expect(api.headers.get('Set-Cookie')).toContain('Max-Age=0');
+      expect(f.deps.fetcher).not.toHaveBeenCalled();
+      expect(f.run).not.toHaveBeenCalled();
+      expect(f.search).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); vi.unstubAllGlobals(); f.close(); }
   });
 
   it('does not search on an invalid plan, and caps concurrent failed turns', async () => {

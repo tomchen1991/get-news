@@ -1,5 +1,5 @@
-import * as oidc from 'openid-client';
 import { loginSourceBucket, loginSourceHeader } from './news-chat-login-limit';
+import { newsChatLoginPage } from './news-chat-page';
 
 export interface NewsChatAuthEnv {
   DB: D1Database;
@@ -11,9 +11,9 @@ export interface NewsChatAuthEnv {
 }
 
 const issuer = 'https://auth.falsita.cn';
-const callback = '/api/news-chat/callback';
-const stateCookie = '__Host-news-chat-state', sessionCookie = '__Host-news-chat-session';
-const loginLifetime = 300, sessionLifetime = 900;
+const totpGrant = 'urn:falsita:params:oauth:grant-type:totp';
+const sessionCookie = '__Host-news-chat-session';
+const sessionLifetime = 900;
 const opaque = /^[A-Za-z0-9_-]{43}$/;
 const headers = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' };
 
@@ -39,39 +39,45 @@ export const clearNewsChatSession = () => cookie(sessionCookie, '', 0);
 async function hash(value: string) {
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))), byte => byte.toString(16).padStart(2, '0')).join('');
 }
-const redirect = (location: string, cookies: string[] = []) => {
-  const response = new Response(null, { status: 303, headers: { ...headers, Location: location } });
-  for (const value of cookies) response.headers.append('Set-Cookie', value);
-  return response;
-};
+function randomSession() {
+  return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+}
 export function newsChatAuthError(status: number, extra: HeadersInit = {}) {
   const errors: Record<number, string> = { 400: 'invalid_login', 401: 'unauthorized', 403: 'forbidden', 405: 'method_not_allowed', 429: 'login_rate_limit', 503: 'auth_unavailable' };
   return Response.json({ error: errors[status] }, { status, headers: { ...headers, ...extra } });
 }
 
-async function configuration(env: NewsChatAuthEnv, fetcher: typeof fetch) {
-  const config = settings(env);
-  if (!config) throw new Error('Missing OIDC configuration');
-  const client = await oidc.discovery(new URL(issuer), config.id, { id_token_signed_response_alg: 'RS256' }, oidc.ClientSecretBasic(config.secret), {
-    [oidc.customFetch]: (url, init) => {
-      if (new URL(url).origin !== issuer) throw new Error('Unexpected OIDC origin');
-      return fetcher(url, { ...init, redirect: 'error' });
-    }, timeout: 5,
+function authPost(endpoint: '/token' | '/token/revocation', config: { id: string; secret: string }, fields: Record<string, string>, fetcher: typeof fetch) {
+  // Fixed endpoints from the Auth contract. Never forward credentials or codes to redirects.
+  const encode = (value: string) => new URLSearchParams({ v: value }).toString().slice(2);
+  return fetcher(issuer + endpoint, { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(5000),
+    headers: { Authorization: 'Basic ' + btoa(`${encode(config.id)}:${encode(config.secret)}`), Accept: 'application/json' },
+    body: new URLSearchParams(fields),
   });
-  const metadata = client.serverMetadata();
-  for (const key of ['authorization_endpoint', 'token_endpoint', 'userinfo_endpoint', 'jwks_uri', 'revocation_endpoint'] as const) {
-    const endpoint = metadata[key];
-    if (!endpoint || new URL(endpoint).origin !== issuer) throw new Error('Unexpected OIDC endpoint');
-  }
-  if (metadata.userinfo_endpoint !== `${issuer}/me`) throw new Error('Unexpected userinfo endpoint');
-  oidc.enableNonRepudiationChecks(client);
-  return client;
+}
+
+async function readCode(request: Request) {
+  if (request.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/x-www-form-urlencoded' || !request.body) return null;
+  const reader = request.body.getReader(), decoder = new TextDecoder();
+  let size = 0, input = '';
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > 256) { await reader.cancel(); return null; }
+      input += decoder.decode(part.value, { stream: true });
+    }
+    const form = new URLSearchParams(input + decoder.decode()), code = form.get('code')?.trim() ?? '';
+    return form.size === 1 && /^[0-9]{6}$/.test(code) ? code : null;
+  } catch { return null; }
+  finally { reader.releaseLock(); }
 }
 
 type AuthStatus = 200 | 401 | 403 | 503;
 async function checkOwner(token: string, fetcher: typeof fetch): Promise<AuthStatus> {
   try {
-    const response = await fetcher(`${issuer}/me`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(5000) });
+    const response = await fetcher(`${issuer}/me`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, redirect: 'manual', cache: 'no-store', signal: AbortSignal.timeout(5000) });
     if (response.status === 401) return 401;
     if (response.status !== 200) return 503;
     const user: unknown = await response.json();
@@ -101,58 +107,52 @@ export async function handleNewsChatAuth(request: Request, env: NewsChatAuthEnv,
   const config = settings(env), url = new URL(request.url), logout = url.pathname === '/api/news-chat/logout';
   if (!config) return newsChatAuthError(503);
   if (url.origin !== config.origin) return newsChatAuthError(403);
-  const method = logout ? 'POST' : 'GET';
-  if (request.method !== method) return newsChatAuthError(405, { Allow: method });
-  if (logout && !sameOriginPost(request)) return newsChatAuthError(403);
-  const clearState = cookie(stateCookie, '', 0), now = Date.now();
+  if (!logout && request.method === 'GET') return newsChatLoginPage();
+  if (request.method !== 'POST') return newsChatAuthError(405, { Allow: logout ? 'POST' : 'GET, POST' });
+  if (!sameOriginPost(request)) return newsChatAuthError(403);
+  const now = Date.now();
   try {
     if (logout) {
       const value = readCookie(request, sessionCookie);
       const row = value ? await env.DB.prepare('DELETE FROM site_news_chat_sessions WHERE session_hash=? RETURNING access_token').bind(await hash(value)).first<Session>() : null;
       if (row) {
-        try { await oidc.tokenRevocation(await configuration(env, fetcher), row.access_token, { token_type_hint: 'access_token' }); }
-        catch { return newsChatAuthError(503, { 'Set-Cookie': clearNewsChatSession() }); }
+        try {
+          const result = await authPost('/token/revocation', config, { token: row.access_token, token_type_hint: 'access_token' }, fetcher);
+          if (!result.ok) throw new Error('Token revocation failed');
+        } catch { return newsChatAuthError(503, { 'Set-Cookie': clearNewsChatSession() }); }
       }
       return new Response(null, { status: 204, headers: { ...headers, 'Set-Cookie': clearNewsChatSession() } });
     }
-    if (url.pathname === '/api/news-chat/login') {
-      // Use Cloudflare's client address, not user-supplied forwarding headers.
-      const source = loginSourceBucket(request.headers.get('CF-Connecting-IP'));
-      const slot = await env.NEWS_CHAT_LOGIN_LIMITER?.getByName('login').fetch('https://news-chat-login-limit.internal/', {
-        headers: { [loginSourceHeader]: await hash(source) },
-      });
-      if (slot?.status === 429) {
-        const retryAfter = slot.headers.get('Retry-After');
-        return newsChatAuthError(429, retryAfter ? { 'Retry-After': retryAfter } : {});
-      }
-      if (slot?.status !== 204) return newsChatAuthError(503);
-      const client = await configuration(env, fetcher);
-      const state = oidc.randomState(), nonce = oidc.randomNonce(), verifier = oidc.randomPKCECodeVerifier();
-      const target = oidc.buildAuthorizationUrl(client, { redirect_uri: config.origin + callback, response_type: 'code', scope: 'openid profile', state, nonce,
-        code_challenge_method: 'S256', code_challenge: await oidc.calculatePKCECodeChallenge(verifier) });
-      await env.DB.batch([
-        env.DB.prepare('DELETE FROM site_news_chat_logins WHERE expires_at<=?').bind(now),
-        env.DB.prepare('DELETE FROM site_news_chat_sessions WHERE expires_at<=?').bind(now),
-        env.DB.prepare('INSERT INTO site_news_chat_logins(state_hash,nonce,verifier,expires_at) VALUES(?,?,?,?)').bind(await hash(state), nonce, verifier, now + loginLifetime * 1000),
-      ]);
-      return redirect(target.href, [cookie(stateCookie, state, loginLifetime)]);
-    }
-    const state = readCookie(request, stateCookie);
-    if (!state || url.searchParams.get('state') !== state) return newsChatAuthError(400);
-    const pending = await env.DB.prepare('DELETE FROM site_news_chat_logins WHERE state_hash=? AND expires_at>? RETURNING nonce,verifier').bind(await hash(state), now).first<{ nonce: string; verifier: string }>();
-    if (!pending || !url.searchParams.has('code') || url.searchParams.has('error')) return newsChatAuthError(400, { 'Set-Cookie': clearState });
-    const client = await configuration(env, fetcher);
-    const tokens = await oidc.authorizationCodeGrant(client, url, { expectedState: state, expectedNonce: pending.nonce, pkceCodeVerifier: pending.verifier, idTokenExpected: true });
-    if (tokens.claims()?.sub !== 'owner') return newsChatAuthError(403, { 'Set-Cookie': clearState });
-    const status = await checkOwner(tokens.access_token, fetcher);
-    if (status !== 200) return newsChatAuthError(status, { 'Set-Cookie': clearState });
-    const age = Math.min(sessionLifetime, tokens.expiresIn() ?? sessionLifetime);
-    if (!Number.isSafeInteger(age) || age <= 0) return newsChatAuthError(401, { 'Set-Cookie': clearState });
-    const session = oidc.randomState();
-    await env.DB.prepare('INSERT INTO site_news_chat_sessions(session_hash,access_token,expires_at) VALUES(?,?,?)').bind(await hash(session), tokens.access_token, Date.now() + age * 1000).run();
-    return redirect('/ask', [clearState, cookie(sessionCookie, session, age)]);
-  } catch (error) {
-    if (error instanceof oidc.ResponseBodyError && error.error === 'invalid_grant') return newsChatAuthError(401, { 'Set-Cookie': clearState });
-    return newsChatAuthError(503, { 'Set-Cookie': clearState });
+    const code = await readCode(request);
+    if (!code) return newsChatLoginPage(400);
+    // Use Cloudflare's client address, not user-supplied forwarding headers.
+    const source = loginSourceBucket(request.headers.get('CF-Connecting-IP'));
+    const slot = await env.NEWS_CHAT_LOGIN_LIMITER?.getByName('login').fetch('https://news-chat-login-limit.internal/', {
+      headers: { [loginSourceHeader]: await hash(source) },
+    });
+    if (slot?.status === 429) return newsChatLoginPage(429, slot.headers.get('Retry-After'));
+    if (slot?.status !== 204) return newsChatLoginPage(503);
+    const response = await authPost('/token', config, { grant_type: totpGrant, code, scope: 'openid profile' }, fetcher);
+    const receivedAt = Date.now();
+    if (response.status === 429) return newsChatLoginPage(429, response.headers.get('Retry-After'));
+    if (response.status === 400 && (await response.json() as { error?: string } | null)?.error === 'invalid_grant') return newsChatLoginPage(401);
+    if (response.status !== 200) return newsChatLoginPage(503);
+    const token = await response.json() as { access_token?: unknown; token_type?: unknown; expires_in?: unknown } | null;
+    if (!token || typeof token.access_token !== 'string' || !/^[A-Za-z0-9._~+/=-]{1,4096}$/.test(token.access_token) ||
+        typeof token.token_type !== 'string' || token.token_type.toLowerCase() !== 'bearer' ||
+        typeof token.expires_in !== 'number' || !Number.isSafeInteger(token.expires_in) || token.expires_in <= 0) return newsChatLoginPage(503);
+    const status = await checkOwner(token.access_token, fetcher);
+    if (status !== 200) return newsChatLoginPage(status);
+    const expiresAt = receivedAt + Math.min(sessionLifetime, token.expires_in) * 1000;
+    const age = Math.floor((expiresAt - Date.now()) / 1000);
+    if (age <= 0) return newsChatLoginPage(401);
+    const session = randomSession();
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM site_news_chat_sessions WHERE expires_at<=?').bind(Date.now()),
+      env.DB.prepare('INSERT INTO site_news_chat_sessions(session_hash,access_token,expires_at) VALUES(?,?,?)').bind(await hash(session), token.access_token, expiresAt),
+    ]);
+    return new Response(null, { status: 303, headers: { ...headers, Location: '/ask', 'Set-Cookie': cookie(sessionCookie, session, age) } });
+  } catch {
+    return logout ? newsChatAuthError(503) : newsChatLoginPage(503);
   }
 }

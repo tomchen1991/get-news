@@ -38,6 +38,15 @@ form.addEventListener('submit',async event=>{
 });
 send.disabled=false;`;
 
+export function newsChatLoginPage(status = 200, retryAfter: string | null = null) {
+  const messages: Record<number, string> = { 400: '请输入六位验证码。', 401: '验证码无效或已过期，请使用新的验证码。', 403: '当前账号无权访问。', 429: '尝试次数过多，请稍后再试。', 503: '登录服务暂不可用，请稍后再试。' };
+  const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin',
+    'Content-Security-Policy': "default-src 'none'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" });
+  if (retryAfter && /^[0-9]{1,8}$/.test(retryAfter)) headers.set('Retry-After', retryAfter);
+  const message = messages[status];
+  return new Response(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>登录问新闻 · 拾讯</title><link rel="stylesheet" href="/app.css"></head><body><main><div class="masthead"><a class="brand" href="/">拾讯</a></div><h1>登录问新闻</h1><p>输入验证器当前显示的六位验证码。</p>${message ? `<p role="alert">${message}</p>` : ''}<form class="chat-form" action="/api/news-chat/login" method="post"><label for="code">验证码</label><input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required><button type="submit">登录</button></form></main></body></html>`, { status, headers });
+}
+
 export function newsChatAsset(path: string) {
   return new Response(path === '/ask' ? html : js, { headers: {
     'Content-Type': path === '/ask' ? 'text/html; charset=utf-8' : 'text/javascript; charset=utf-8',
