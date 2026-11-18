@@ -5,6 +5,8 @@
  "compatibility_date":"2026-11-01",
  "triggers":{"crons":["*/10 * * * *"]},
  "ai":{"binding":"AI","remote":true},
+ "durable_objects":{"bindings":[{"name":"NEWS_CHAT_LOGIN_LIMITER","class_name":"NewsChatLoginLimiter"}]},
+ "migrations":[{"tag":"news-chat-login-limit-v1","new_sqlite_classes":["NewsChatLoginLimiter"]}],
  "vars":{"SEARCH_ENABLED":"true","JEV_ENABLED":"true","NEWS_TIMEZONE":"Asia/Shanghai","NEWS_MORNING_HOUR":"7","AI_GATEWAY_ID":"cf-gateway","TAVILY_DAILY_CREDITS":"36","TAVILY_MONTHLY_CREDITS":"950","JEV_DAILY_REQUESTS":"360","JEV_MONTHLY_REQUESTS":"10000","DIGEST_ENABLED":"true","DIGEST_MODEL":"@cf/deepseek-ai/deepseek-v4.1-flash-1017","DIGEST_HOUR":"9","DIGEST_MONTHLY_REQUESTS":"31","FEEDBACK_ENABLED":"false","ACCESS_TEAM_DOMAIN":"","ACCESS_AUD":""},
  "d1_databases":[{"binding":"DB","database_name":"get-news","database_id":"f49e8f7f-77d2-484f-8053-c1ed434f7f89","migrations_dir":"migrations"}]
 }

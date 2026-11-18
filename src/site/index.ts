@@ -11,15 +11,24 @@ import { dispatchMessageCenter } from './message-center';
 import { withWorkerPresence } from './worker-presence';
 import { handleNewsChat, newsChatEnabled } from './news-chat';
 import { newsChatAsset } from './news-chat-page';
+import { authorizeNewsChat, clearNewsChatSession, handleNewsChatAuth, newsChatAuthConfigured, newsChatAuthError } from './news-chat-auth';
+export { NewsChatLoginLimiter } from './news-chat-login-limit';
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': status === 200 ? 'public, max-age=60' : 'no-store', 'X-Content-Type-Options': 'nosniff' } });
 export async function handleSiteRequest(request: Request, env: SiteEnv): Promise<Response> {
   const url = new URL(request.url), path = url.pathname;
   if (path.startsWith('/api/feedback')) return handleFeedbackRequest(request, env);
   if (path === '/api/news-chat') return handleNewsChat(request, env);
-  if (request.method !== 'GET') return new Response(null, { status: 405, headers: { Allow: 'GET' } });
   const chatEnabled = newsChatEnabled(env);
-  if (path === '/ask' || path === '/news-chat.js') return chatEnabled ? newsChatAsset(path) : json({ error: 'not_found' }, 404);
-  const asset = siteAsset(path, chatEnabled);
+  if (['/api/news-chat/login', '/api/news-chat/callback', '/api/news-chat/logout'].includes(path)) return chatEnabled ? handleNewsChatAuth(request, env) : json({ error: 'not_found' }, 404);
+  if (request.method !== 'GET') return new Response(null, { status: 405, headers: { Allow: 'GET' } });
+  if (path === '/ask') {
+    if (!chatEnabled) return json({ error: 'not_found' }, 404);
+    const status = await authorizeNewsChat(request, env);
+    if (status === 401) return new Response(null, { status: 303, headers: { Location: '/api/news-chat/login', 'Set-Cookie': clearNewsChatSession(), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } });
+    return status === 200 ? newsChatAsset(path) : newsChatAuthError(status);
+  }
+  if (path === '/news-chat.js') return chatEnabled && newsChatAuthConfigured(env) ? newsChatAsset(path) : json({ error: 'not_found' }, 404);
+  const asset = siteAsset(path, chatEnabled && newsChatAuthConfigured(env) && url.origin === env.APP_ORIGIN);
   if (asset) return asset;
   if (path === '/health') return json({ service: 'get-news', mode: 'public-read-owner-feedback' });
   if (path !== '/api/updates' && path !== '/api/news' && path !== '/api/digests' && !/^\/api\/digests\/(latest|\d{4}-\d{2}-\d{2})$/.test(path)) return json({ error: 'not_found' }, 404);
