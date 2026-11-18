@@ -19,7 +19,7 @@ export async function handleSiteRequest(request: Request, env: SiteEnv): Promise
   if (path.startsWith('/api/feedback')) return handleFeedbackRequest(request, env);
   if (path === '/api/news-chat') return handleNewsChat(request, env);
   const chatEnabled = newsChatEnabled(env);
-  if (['/api/news-chat/login', '/api/news-chat/callback', '/api/news-chat/logout'].includes(path)) return chatEnabled ? handleNewsChatAuth(request, env) : json({ error: 'not_found' }, 404);
+  if (['/api/news-chat/login', '/api/news-chat/logout'].includes(path)) return chatEnabled ? handleNewsChatAuth(request, env) : json({ error: 'not_found' }, 404);
   if (request.method !== 'GET') return new Response(null, { status: 405, headers: { Allow: 'GET' } });
   if (path === '/ask') {
     if (!chatEnabled) return json({ error: 'not_found' }, 404);
