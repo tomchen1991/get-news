@@ -12,6 +12,7 @@ import { withWorkerPresence } from './worker-presence';
 import { handleNewsChat, newsChatEnabled } from './news-chat';
 import { newsChatAsset } from './news-chat-page';
 import { authorizeNewsChat, clearNewsChatSession, handleNewsChatAuth, newsChatAuthConfigured, newsChatAuthError } from './news-chat-auth';
+export { NewsChatLoginLimiter } from './news-chat-login-limit';
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': status === 200 ? 'public, max-age=60' : 'no-store', 'X-Content-Type-Options': 'nosniff' } });
 export async function handleSiteRequest(request: Request, env: SiteEnv): Promise<Response> {
   const url = new URL(request.url), path = url.pathname;

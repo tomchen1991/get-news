@@ -6,6 +6,7 @@ export interface NewsChatAuthEnv {
   OIDC_ISSUER?: string;
   OIDC_CLIENT_ID?: string;
   OIDC_CLIENT_SECRET?: string;
+  NEWS_CHAT_LOGIN_LIMITER?: DurableObjectNamespace;
 }
 
 const issuer = 'https://auth.falsita.cn';
@@ -43,7 +44,7 @@ const redirect = (location: string, cookies: string[] = []) => {
   return response;
 };
 export function newsChatAuthError(status: number, extra: HeadersInit = {}) {
-  const errors: Record<number, string> = { 400: 'invalid_login', 401: 'unauthorized', 403: 'forbidden', 405: 'method_not_allowed', 503: 'auth_unavailable' };
+  const errors: Record<number, string> = { 400: 'invalid_login', 401: 'unauthorized', 403: 'forbidden', 405: 'method_not_allowed', 429: 'login_rate_limit', 503: 'auth_unavailable' };
   return Response.json({ error: errors[status] }, { status, headers: { ...headers, ...extra } });
 }
 
@@ -114,6 +115,12 @@ export async function handleNewsChatAuth(request: Request, env: NewsChatAuthEnv,
       return new Response(null, { status: 204, headers: { ...headers, 'Set-Cookie': clearNewsChatSession() } });
     }
     if (url.pathname === '/api/news-chat/login') {
+      const slot = await env.NEWS_CHAT_LOGIN_LIMITER?.getByName('login').fetch('https://news-chat-login-limit.internal/');
+      if (slot?.status === 429) {
+        const retryAfter = slot.headers.get('Retry-After');
+        return newsChatAuthError(429, retryAfter ? { 'Retry-After': retryAfter } : {});
+      }
+      if (slot?.status !== 204) return newsChatAuthError(503);
       const client = await configuration(env, fetcher);
       const state = oidc.randomState(), nonce = oidc.randomNonce(), verifier = oidc.randomPKCECodeVerifier();
       const target = oidc.buildAuthorizationUrl(client, { redirect_uri: config.origin + callback, response_type: 'code', scope: 'openid profile', state, nonce,
