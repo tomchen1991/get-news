@@ -30,6 +30,8 @@ FEEDBACK_ENABLED=false
 ACCESS_TEAM_DOMAIN=
 ACCESS_AUD=
 FEEDBACK_ALLOWED_EMAILS=
+# Optional owner-only /ask and /api/news-chat; shares the Access settings above.
+NEWS_CHAT_ENABLED=false
 # AI binding is remote: enabling Jev even in wrangler dev can incur charges.
 # Jev uses the AI binding + Gateway billing; no model API key is read here.
 # Optional legacy local TUI /plan only; never used by the production news site.
