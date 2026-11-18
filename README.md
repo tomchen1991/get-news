@@ -77,7 +77,11 @@ Worker 内热点 agent 的人物状态可独立上报采集服务，默认关闭
 
 启用后，网站导航的「问新闻」打开 `/ask`。直接输入「昨天 TGA 年度游戏有哪些提名？」；主模型（`DIGEST_MODEL`）把问题改成具体搜索词和日期，Worker 自动调用 Tavily 并显示标题、摘要和原文链接。可以接着问「任天堂有哪些？」。页面保留本次会话，刷新会清空；最近三条已成功搜索的提问用于理解追问。结果是搜索摘要，不是模型核实后的答案，不经 Jev，不写入日报或推送。
 
-默认关闭。启用时先应用 `0016_news_chat.sql`，用同一个 Cloudflare Access 应用保护 `/ask` 和 `/api/news-chat`（如也启用反馈，可将 `/api/feedback*` 加入同一应用），配置 `ACCESS_TEAM_DOMAIN`、`ACCESS_AUD` 和 `FEEDBACK_ALLOWED_EMAILS`，再设置 `NEWS_CHAT_ENABLED=true`。无需启用反馈或日报生成开关，但需要 `DIGEST_MODEL`、AI Gateway 和 Tavily 密钥。每轮最多一次主模型、一次搜索；所有账号合计每日 5 轮、每月 60 轮，搜索还共享定时采集的 Tavily 额度。提问与上下文发送给主模型，关键词发送给 Tavily；Worker D1 只记用量、不存对话。
+默认关闭。启用前应用 `0016_news_chat.sql` 与 `0017_news_chat_auth.sql`；在 Auth 管理页核查或注册独立 confidential client，选 `client_secret_basic`、绑定 owner 登录组，并精确登记 `https://get-news.fzt-tom.workers.dev/api/news-chat/callback`（如切换域名，回调与 `APP_ORIGIN` 一并更新）。配置 `APP_ORIGIN`（HTTPS Origin，无尾部斜杠）、`OIDC_ISSUER=https://auth.falsita.cn`、`OIDC_CLIENT_ID`，通过 Worker Secret 配置 `OIDC_CLIENT_SECRET`，再设置 `NEWS_CHAT_ENABLED=true`。先验证登录回跳、匿名及过期 API 请求被拒绝、已登录搜索可用，再移除仅为问新闻设置的旧 Access 保护；反馈仍独立使用 Access。
+
+`OIDC_CLIENT_ID` 是普通 Worker 变量，可在 Cloudflare 控制台配置。`OIDC_CLIENT_SECRET` 必须作为 Secret 加到目标 Worker：使用控制台的 Secret 类型，或在获准变更生产配置后运行 `npx wrangler secret put OIDC_CLIENT_SECRET` 并按提示输入。不要把 Secret 放在 `wrangler.jsonc`、命令参数、聊天或仓库中。
+
+登录在 Auth 站点完成，仅允许 `sub=owner`。浏览器仅保存不透明会话标识；D1 在后端保存访问令牌，不保存刷新令牌；会话最长 15 分钟且不滑动。进入 `/ask` 或提交搜索时均在线校验，认证故障时不执行搜索。无需启用反馈或日报生成开关，但需要 `DIGEST_MODEL`、AI Gateway 和 Tavily 密钥。每轮最多一次主模型、一次搜索；每日 5 轮、每月 60 轮，搜索还共享定时采集的 Tavily 额度。提问与上下文发送给主模型，关键词发送给 Tavily；D1 不存对话。
 
 ### 命令行与代码调用
 

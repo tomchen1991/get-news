@@ -1,4 +1,4 @@
-import { accessConfigured, accessUser } from './access';
+import { authorizeNewsChat, clearNewsChatSession, newsChatAuthError, sameOriginPost } from './news-chat-auth';
 import { createGatewayChat } from './chat';
 import { localClock, reserve, tavilyBudget, type SiteEnv } from './pipeline';
 import { createTavilySearchProvider, SearchError, type TavilySearchProvider } from '../search/providers';
@@ -10,8 +10,7 @@ const json = (data: unknown, status = 200, headers: HeadersInit = {}) => Respons
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const text = (value: unknown, length: number): value is string => typeof value === 'string' && value.length <= length && !!value.trim();
 const day = (value: unknown): value is string => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
-const accessEnv = (env: SiteEnv) => ({ ...env, FEEDBACK_ENABLED: env.NEWS_CHAT_ENABLED });
-export const newsChatEnabled = (env: SiteEnv) => accessConfigured(accessEnv(env));
+export const newsChatEnabled = (env: SiteEnv) => env.NEWS_CHAT_ENABLED === 'true';
 
 export function parseNewsPlan(raw: string, today: string): NewsFetchRequest {
   const plan: unknown = JSON.parse(raw);
@@ -43,8 +42,9 @@ async function readQuestion(request: Request) {
 export async function handleNewsChat(request: Request, env: SiteEnv, deps: { fetcher?: typeof fetch; search?: TavilySearchProvider; now?: number } = {}) {
   if (!newsChatEnabled(env)) return json({ error: 'disabled' }, 404);
   if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405, { Allow: 'POST' });
-  if (request.headers.get('Origin') !== new URL(request.url).origin || request.headers.get('Sec-Fetch-Site') === 'cross-site') return json({ error: 'origin_rejected' }, 403);
-  if (!await accessUser(request, accessEnv(env), deps)) return json({ error: 'unauthorized' }, 401);
+  if (!sameOriginPost(request)) return json({ error: 'origin_rejected' }, 403);
+  const auth = await authorizeNewsChat(request, env, deps);
+  if (auth !== 200) return newsChatAuthError(auth, auth === 401 ? { 'Set-Cookie': clearNewsChatSession() } : {});
   const input = await readQuestion(request);
   if (!input) return json({ error: 'invalid_question' }, 400);
   try {

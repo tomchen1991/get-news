@@ -11,8 +11,9 @@ import { collectionSince, isNonNewsPage } from './source-policy';
 import type { WorkerPresenceEnv } from './worker-presence';
 import type { MessageCenterEnv } from './message-center';
 
-export interface SiteEnv extends AccessEnv, PushEventEnv, WorkerPresenceEnv, MessageCenterEnv {
-  DB: D1Database;
+import type { NewsChatAuthEnv } from './news-chat-auth';
+
+export interface SiteEnv extends AccessEnv, PushEventEnv, WorkerPresenceEnv, MessageCenterEnv, NewsChatAuthEnv {
   AI?: AiBinding;
   SEARCH_ENABLED?: string;
   JEV_ENABLED?: string;
