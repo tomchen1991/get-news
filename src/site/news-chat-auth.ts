@@ -1,4 +1,5 @@
 import * as oidc from 'openid-client';
+import { loginSourceBucket, loginSourceHeader } from './news-chat-login-limit';
 
 export interface NewsChatAuthEnv {
   DB: D1Database;
@@ -115,7 +116,11 @@ export async function handleNewsChatAuth(request: Request, env: NewsChatAuthEnv,
       return new Response(null, { status: 204, headers: { ...headers, 'Set-Cookie': clearNewsChatSession() } });
     }
     if (url.pathname === '/api/news-chat/login') {
-      const slot = await env.NEWS_CHAT_LOGIN_LIMITER?.getByName('login').fetch('https://news-chat-login-limit.internal/');
+      // Use Cloudflare's client address, not user-supplied forwarding headers.
+      const source = loginSourceBucket(request.headers.get('CF-Connecting-IP'));
+      const slot = await env.NEWS_CHAT_LOGIN_LIMITER?.getByName('login').fetch('https://news-chat-login-limit.internal/', {
+        headers: { [loginSourceHeader]: await hash(source) },
+      });
       if (slot?.status === 429) {
         const retryAfter = slot.headers.get('Retry-After');
         return newsChatAuthError(429, retryAfter ? { 'Retry-After': retryAfter } : {});

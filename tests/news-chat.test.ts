@@ -2,6 +2,8 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { handleNewsChat } from '../src/site/news-chat';
 import { handleSiteRequest, NewsChatLoginLimiter } from '../src/site/index';
 import { handleNewsChatAuth } from '../src/site/news-chat-auth';
+import { loginSourceHeader } from '../src/site/news-chat-login-limit';
+import { newsChatAsset } from '../src/site/news-chat-page';
 import type { SiteEnv } from '../src/site/pipeline';
 import { createDatabase } from './d1';
 
@@ -52,6 +54,27 @@ describe('news chat', () => {
     } finally { f.close(); }
   });
 
+  it('sets a same-origin referrer policy for both browser POSTs without changing the page policy', async () => {
+    expect(newsChatAsset('/ask').headers.get('Referrer-Policy')).toBe('no-referrer');
+    const script = await newsChatAsset('/news-chat.js').text();
+    const listeners = new Map<string, (event?: { preventDefault(): void }) => Promise<void>>();
+    const element = () => ({ value: '最近有什么新闻？', append() {}, focus() {} });
+    const document = {
+      getElementById: (id: string) => ({ ...element(), addEventListener: (_event: string, fn: () => Promise<void>) => listeners.set(id, fn) }),
+      createElement: element,
+    };
+    const fetcher = vi.fn(async (_path: string, _options: { method?: string; referrerPolicy?: string }) => Response.json({ query: 'test', items: [] }));
+    const assign = vi.fn();
+    new Function('document', 'fetch', 'location', script)(document, fetcher, { assign });
+    await listeners.get('logout')!();
+    await listeners.get('ask-form')!({ preventDefault() {} });
+    expect(fetcher.mock.calls.map(([path, init]) => [path, init.method, init.referrerPolicy])).toEqual([
+      ['/api/news-chat/logout', 'POST', 'same-origin'],
+      ['/api/news-chat', 'POST', 'same-origin'],
+    ]);
+    expect(assign).toHaveBeenCalledExactlyOnceWith('/');
+  });
+
   it('returns the login limit before OIDC discovery or any D1 access', async () => {
     const f = await fixture();
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => discovery());
@@ -86,27 +109,63 @@ describe('news chat', () => {
     } finally { f.close(); }
   });
 
-  it('shares a rolling login allowance that survives object recreation', async () => {
+  it('passes only a hashed Cloudflare source bucket to the limiter', async () => {
+    const f = await fixture();
+    const fetchLimit = vi.fn(async (_url: string, _init: RequestInit) => new Response(null, { status: 429 }));
+    const env = { ...f.env, NEWS_CHAT_LOGIN_LIMITER: { getByName: () => ({ fetch: fetchLimit }) } as unknown as DurableObjectNamespace };
+    const bucket = async (ip?: string) => {
+      const headers = new Headers({ 'X-Forwarded-For': '192.0.2.1', [loginSourceHeader]: 'f'.repeat(64) });
+      if (ip) headers.set('CF-Connecting-IP', ip);
+      const request = new Request(origin + '/api/news-chat/login', { headers });
+      expect((await handleNewsChatAuth(request, env)).status).toBe(429);
+      const sent = new Headers(fetchLimit.mock.lastCall![1].headers);
+      expect(Array.from(sent.keys())).toEqual([loginSourceHeader.toLowerCase()]);
+      return sent.get(loginSourceHeader);
+    };
+    try {
+      const ipv4 = await bucket('192.0.2.1');
+      expect(ipv4).toMatch(/^[a-f0-9]{64}$/);
+      expect(ipv4).not.toBe('f'.repeat(64));
+      expect(await bucket('192.0.2.2')).not.toBe(ipv4);
+      const ipv6 = await bucket('2001:db8:0:1::1');
+      expect(await bucket('2001:0DB8:0000:0001:abcd::2')).toBe(ipv6);
+      expect(await bucket('2001:db8:0:2::1')).not.toBe(ipv6);
+      const unknown = await bucket();
+      expect(unknown).not.toBe(ipv4);
+      expect(await bucket('192.0.2.1, 192.0.2.2')).toBe(unknown);
+    } finally { f.close(); }
+  });
+
+  it('enforces independent source and shared rolling allowances across object recreation', async () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
-    const data = new Map<string, unknown>();
+    // Preserve the shared reservation made before the source-aware deployment.
+    const data = new Map<string, unknown>([['attempts', [now]]]);
     const put = vi.fn((key: string, value: unknown) => data.set(key, value));
     const ctx = { storage: { transactionSync: (op: () => unknown) => op(), kv: { get: (key: string) => data.get(key), put } } } as unknown as DurableObjectState;
+    let limiter = new NewsChatLoginLimiter(ctx);
+    const reserve = (source: string) => limiter.fetch(new Request('https://news-chat-login-limit.internal/', { headers: { [loginSourceHeader]: source.repeat(64) } }));
     try {
-      let limiter = new NewsChatLoginLimiter(ctx);
-      expect((await limiter.fetch()).status).toBe(204);
       clock.mockReturnValue(now + 60_000);
-      const responses = await Promise.all(Array.from({ length: 5 }, () => limiter.fetch()));
-      expect(responses.map(r => r.status)).toEqual([204, 204, 204, 204, 429]);
-      expect(responses[4].headers.get('Retry-After')).toBe('240');
-      expect(put).toHaveBeenCalledTimes(5);
+      const sameSource = await Promise.all([reserve('a'), reserve('a'), reserve('a')]);
+      expect(sameSource.map(r => r.status)).toEqual([204, 204, 429]);
+      expect(sameSource[2].headers.get('Retry-After')).toBe('300');
+      expect((await reserve('b')).status).toBe(204);
+      expect((await reserve('c')).status).toBe(204);
+      expect(put).toHaveBeenCalledTimes(4);
+
       limiter = new NewsChatLoginLimiter(ctx);
+      expect((await reserve('a')).headers.get('Retry-After')).toBe('300');
+      expect((await reserve('d')).headers.get('Retry-After')).toBe('240');
       clock.mockReturnValue(now + 299_999);
-      const denied = await limiter.fetch();
+      const denied = await reserve('d');
       expect(denied.status).toBe(429);
       expect(denied.headers.get('Retry-After')).toBe('1');
       clock.mockReturnValue(now + 300_000);
-      expect((await limiter.fetch()).status).toBe(204);
-      expect((await limiter.fetch()).status).toBe(429);
+      expect((await reserve('a')).status).toBe(429);
+      expect((await reserve('d')).status).toBe(204);
+      expect((await reserve('e')).status).toBe(429);
+      clock.mockReturnValue(now + 360_000);
+      expect((await reserve('a')).status).toBe(204);
     } finally { clock.mockRestore(); }
   });
 
@@ -176,7 +235,10 @@ describe('news chat', () => {
       expect(await (await handleSiteRequest(ask, f.env)).text()).toContain('昨天 TGA 年度游戏有哪些提名');
       const logout = (source: string) => new Request(origin + '/api/news-chat/logout', { method: 'POST', headers: { Origin: source, Cookie: session.split(';')[0] } });
       expect((await handleNewsChatAuth(logout('https://other.example'), f.env, fetcher)).status).toBe(403);
-      expect((await handleNewsChatAuth(logout(origin), f.env, fetcher)).status).toBe(204);
+      expect((await handleNewsChatAuth(logout('null'), f.env, fetcher)).status).toBe(403);
+      const loggedOut = await handleNewsChatAuth(logout(origin), f.env, fetcher);
+      expect(loggedOut.status).toBe(204);
+      expect(loggedOut.headers.get('Set-Cookie')).toContain('__Host-news-chat-session=; Path=/; Max-Age=0');
       expect(revoke).toHaveBeenCalledExactlyOnceWith('access');
       expect((await handleSiteRequest(ask, f.env)).status).toBe(303);
       expect(f.reserveLogin).toHaveBeenCalledTimes(1);

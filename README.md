@@ -81,7 +81,7 @@ Worker 内热点 agent 的人物状态可独立上报采集服务，默认关闭
 
 `OIDC_CLIENT_ID` 是非敏感的普通变量；不要只在 Cloudflare 控制台设置，否则后续常规 Git 部署可能覆盖它，导致问新闻登录和 API 不可用。`OIDC_CLIENT_SECRET` 必须作为 Secret 加到目标 Worker：使用控制台的 Secret 类型，或在获准变更生产配置后运行 `npx wrangler secret put OIDC_CLIENT_SECRET` 并按提示输入。不要把 Secret 放在 `wrangler.jsonc`、命令参数、聊天或仓库中。
 
-启用时保留 `wrangler.jsonc` 中的 `NEWS_CHAT_LOGIN_LIMITER` 绑定和 Durable Object 迁移。所有登录发起请求共享滚动 5 分钟 5 次的全站额度；超额返回 `429` 和 `Retry-After`，限流器不可用时返回 `503`，两种情况下均不会请求 OIDC discovery 或写 D1。此限制不影响已登录会话、回调或退出。
+启用时保留 `wrangler.jsonc` 中的 `NEWS_CHAT_LOGIN_LIMITER` 绑定和 Durable Object 迁移。发起登录同时受滚动 5 分钟全站 5 次、每来源 2 次的限制。来源按 Cloudflare 提供的客户端 IPv4 地址或 IPv6 `/64` 网段划分，缺失或无效地址共用一个来源额度。单一来源无法独占全站额度，但多个来源仍可能用完全站额度。超额返回 `429` 和 `Retry-After`，限流器不可用时返回 `503`，两种情况下均不会请求 OIDC discovery 或写 D1。此限制不影响已登录会话、回调或退出。
 
 登录在 Auth 站点完成，仅允许 `sub=owner`。浏览器仅保存不透明会话标识；D1 在后端保存访问令牌，不保存刷新令牌；会话最长 15 分钟且不滑动。进入 `/ask` 或提交搜索时均在线校验，认证故障时不执行搜索。无需启用反馈或日报生成开关，但需要 `DIGEST_MODEL`、AI Gateway 和 Tavily 密钥。每轮最多一次主模型、一次搜索；每日 5 轮、每月 60 轮，搜索还共享定时采集的 Tavily 额度。提问与上下文发送给主模型，关键词发送给 Tavily；D1 不存对话。
 

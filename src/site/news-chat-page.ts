@@ -9,7 +9,7 @@ logout.addEventListener('click',async()=>{
  if(pending)return;
  logout.disabled=true;send.disabled=true;
  try{
-  const response=await fetch('/api/news-chat/logout',{method:'POST',credentials:'same-origin',cache:'no-store',redirect:'error'});
+  const response=await fetch('/api/news-chat/logout',{method:'POST',credentials:'same-origin',referrerPolicy:'same-origin',cache:'no-store',redirect:'error'});
   if(response.ok){location.assign('/');return;}
  }catch{}
  status.textContent='未能确认退出状态，请刷新核对。';logout.disabled=false;send.disabled=false;
@@ -19,7 +19,7 @@ form.addEventListener('submit',async event=>{
  const turn=el('article');turn.className='chat-turn';turn.append(el('h2','你'),el('p',message));const reply=el('section');reply.append(el('h2','拾讯'));turn.append(reply);thread.append(turn);
  pending=true;send.disabled=true;box.value='';status.textContent='正在提炼关键词并搜索…';
  try{
-  const response=await fetch('/api/news-chat',{method:'POST',credentials:'same-origin',cache:'no-store',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({message,history:history.slice(-3)})});
+  const response=await fetch('/api/news-chat',{method:'POST',credentials:'same-origin',referrerPolicy:'same-origin',cache:'no-store',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({message,history:history.slice(-3)})});
   if(!response.ok){
    reply.append(el('p',errors[response.status]||'这次搜索未完成。'));
    if(response.status===401){const login=el('a','重新登录');login.href='/ask';reply.append(login);}
