@@ -3,6 +3,7 @@ import { localClock, type SiteEnv } from './pipeline';
 import { capturePushEvents, pushThreshold, type PushEvent } from './push';
 
 export interface MessageCenterEnv {
+  WORKER_VERSION?: { id: string };
   MESSAGE_CENTER_ENABLED?: string;
   MESSAGE_CENTER_URL?: string;
   MESSAGE_CENTER_PRODUCER_TOKEN?: string;
@@ -73,12 +74,36 @@ export async function dispatchMessageCenter(env: SiteEnv, deps: { now?: number; 
     if (!await store.run(`INSERT OR IGNORE INTO site_message_deliveries(id,recipient_id,kind,local_day,status,payload_json,reserved_at)
       VALUES(?,'owner',?,?,'reserved',?,?)`,
       message.externalId, kind, day, payload, now)) continue;
+    const {status,httpStatus} = await postMessage(base, token, payload, deps.fetcher);
+    await store.run('UPDATE site_message_deliveries SET status=?,finished_at=?,http_status=? WHERE id=?', status, now, httpStatus, message.externalId);
+    if (status === 'accepted') accepted++;
+  }
+  return accepted;
+}
+
+/** First scheduled invocation of a deployed version; independent of news, digest and model jobs. */
+export async function announceRelease(env: SiteEnv, fetcher: typeof fetch = fetch) {
+  if (env.MESSAGE_CENTER_ENABLED !== 'true') return;
+  const id = env.WORKER_VERSION?.id;
+  const token = env.MESSAGE_CENTER_PRODUCER_TOKEN;
+  const base = env.MESSAGE_CENTER_URL ?? 'https://messages.falsita.cn';
+  if (!id || !/^[a-f0-9-]{36}$/i.test(id) || !token || !/^[\x21-\x7e]{16,512}$/.test(token) || base !== 'https://messages.falsita.cn') throw new Error('Invalid release announcement configuration');
+  const store = new Store(env.DB), now = Date.now();
+  if (!await store.run("INSERT OR IGNORE INTO site_release_deliveries(version_id,reserved_at,status) VALUES(?,?,'reserved')", id, now)) return;
+  const payload: Message = { externalId: `news-release:${id}`, type: 'news.release', title: '新闻助手已上线', body: `生产版本 ${id.slice(0,8)} 已上线。这是该版本的推送验证消息。`, priority:'normal', metadata:{versionId:id}, occurredAt:new Date(now).toISOString() };
+  const {status,httpStatus} = await postMessage(base,token,JSON.stringify(payload),fetcher);
+  await store.run('UPDATE site_release_deliveries SET status=?,http_status=? WHERE version_id=?',status,httpStatus,id);
+  if (status !== 'accepted') console.error('release_announcement_not_accepted', id, status, httpStatus);
+}
+
+async function postMessage(base:string,token:string,payload:string,fetcher:typeof fetch = fetch) {
     let status = 'unknown', httpStatus: number | null = null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
-      const response = await (deps.fetcher ?? fetch)(`${base}/v1/messages`, {
-        method: 'POST', redirect: 'error', signal: controller.signal,
+      const response = await fetcher(`${base}/v1/messages`, {
+        // Workers only supports follow/manual. Return 3xx to the classifier without forwarding credentials.
+        method: 'POST', redirect: 'manual', signal: controller.signal,
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: payload,
       });
       httpStatus = response.status;
@@ -88,8 +113,5 @@ export async function dispatchMessageCenter(env: SiteEnv, deps: { now?: number; 
       await response.body?.cancel();
     } catch { /* Network/redirect/timeout outcomes remain unknown; never retry automatically. */ }
     finally { clearTimeout(timer); }
-    await store.run('UPDATE site_message_deliveries SET status=?,finished_at=?,http_status=? WHERE id=?', status, now, httpStatus, message.externalId);
-    if (status === 'accepted') accepted++;
-  }
-  return accepted;
+    return {status,httpStatus};
 }

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase } from './d1';
 import { Store } from '../src/store';
-import { dispatchMessageCenter } from '../src/site/message-center';
+import { announceRelease, dispatchMessageCenter } from '../src/site/message-center';
 import type { SiteEnv } from '../src/site/pipeline';
 
 const now = Date.parse('2026-11-17T04:00:00Z');
@@ -25,6 +25,19 @@ async function setup() {
 }
 
 describe('message center delivery (all HTTP mocked)', () => {
+  it.each([201, 302])('announces each live version once (HTTP %i)', async code => {
+    const {env,store} = await setup();
+    const id = '12345678-1234-4000-8000-123456789abc'; env.WORKER_VERSION = {id};
+    const fetcher = vi.fn(async (_url:RequestInfo | URL, init?:RequestInit) => {
+      expect(await store.first('SELECT status FROM site_release_deliveries WHERE version_id=?',id)).toEqual({status:'reserved'});
+      expect(JSON.parse(String(init?.body))).toMatchObject({externalId:`news-release:${id}`,type:'news.release'});
+      expect(init?.redirect).toBe('manual'); return new Response(null,{status:code});
+    });
+    await Promise.all([announceRelease(env,fetcher),announceRelease(env,fetcher)]);
+    await announceRelease(env,fetcher);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(await store.first('SELECT status,http_status FROM site_release_deliveries')).toEqual({status:code===201?'accepted':'unknown',http_status:code});
+  });
   it('reserves before HTTPS POST, sends even an empty digest, and deduplicates', async () => {
     const { env, store, article, digest } = await setup();
     await digest(); await article('high'); await article('boundary', .8); await article('low', .7);
@@ -32,7 +45,7 @@ describe('message center delivery (all HTTP mocked)', () => {
       const payload = JSON.parse(init!.body as string);
       expect(await store.first('SELECT status FROM site_message_deliveries WHERE id=?', payload.externalId)).toEqual({ status: 'reserved' });
       expect(url).toBe('https://messages.falsita.cn/v1/messages');
-      expect(init).toMatchObject({ redirect: 'error', headers: { Authorization: 'Bearer test-producer-token' } });
+      expect(init).toMatchObject({ redirect: 'manual', headers: { Authorization: 'Bearer test-producer-token' } });
       expect(JSON.stringify(payload)).not.toContain('PRIVATE');
       return new Response('{}', { status: 201 });
     });
@@ -62,7 +75,7 @@ describe('message center delivery (all HTTP mocked)', () => {
     expect(await dispatchMessageCenter(env, { now, fetcher })).toBe(0);
     expect(await dispatchMessageCenter(env, { now: now + 600000, fetcher })).toBe(0);
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(await store.first('SELECT status FROM site_message_deliveries')).toEqual({ status: outcome === '409' ? 'rejected' : 'unknown' });
+    expect(await store.first('SELECT status,http_status FROM site_message_deliveries')).toEqual({ status: outcome === '409' ? 'rejected' : 'unknown', http_status: outcome === 'timeout' ? null : Number(outcome) });
   });
   it('atomically deduplicates concurrent dispatchers without dropping qualifying news', async () => {
     const { env, store, article, digest } = await setup();

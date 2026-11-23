@@ -7,7 +7,7 @@ import { rollingUpdates } from './updates';
 import { dispatchManualIssue } from './manual';
 import { dispatchJevSmoke } from './smoke';
 import { capturePushEvents } from './push';
-import { dispatchMessageCenter } from './message-center';
+import { announceRelease, dispatchMessageCenter } from './message-center';
 import { withWorkerPresence } from './worker-presence';
 import { handleNewsChat, newsChatEnabled } from './news-chat';
 import { newsChatAsset } from './news-chat-page';
@@ -64,6 +64,7 @@ export async function handleSiteRequest(request: Request, env: SiteEnv): Promise
 export default {
   fetch: handleSiteRequest,
   async scheduled(event: ScheduledController, env: SiteEnv, ctx: ExecutionContext) {
+    ctx.waitUntil(announceRelease(env).catch(() => console.error('release_announcement_failed')));
     ctx.waitUntil(withWorkerPresence(env, async () => {
       try { if (await dispatchJevSmoke(env)) return; } catch (error) { console.error('jev_smoke_dispatch_failed', String(error)); return; }
       try {
