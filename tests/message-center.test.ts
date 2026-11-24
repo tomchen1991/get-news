@@ -29,8 +29,13 @@ describe('message center delivery (all HTTP mocked)', () => {
     const {env,store} = await setup();
     const id = '12345678-1234-4000-8000-123456789abc'; env.WORKER_VERSION = {id};
     const fetcher = vi.fn(async (_url:RequestInfo | URL, init?:RequestInit) => {
-      expect(await store.first('SELECT status FROM site_release_deliveries WHERE version_id=?',id)).toEqual({status:'reserved'});
-      expect(JSON.parse(String(init?.body))).toMatchObject({externalId:`news-release:${id}`,type:'news.release'});
+      const reservation = await store.first<{ status: string; reserved_at: number }>('SELECT status,reserved_at FROM site_release_deliveries WHERE version_id=?', id);
+      expect(reservation?.status).toBe('reserved');
+      expect(JSON.parse(String(init?.body))).toEqual({
+        externalId: `news-release:${id}`, type: 'news.release', title: '新闻助手新版本已运行',
+        body: '版本 12345678 已触发首次定时任务；此通知用于验证消息投递。', priority: 'low',
+        metadata: { versionId: id }, occurredAt: new Date(reservation!.reserved_at).toISOString(),
+      });
       expect(init?.redirect).toBe('manual'); return new Response(null,{status:code});
     });
     await Promise.all([announceRelease(env,fetcher),announceRelease(env,fetcher)]);
@@ -40,10 +45,10 @@ describe('message center delivery (all HTTP mocked)', () => {
   });
   it('reserves before HTTPS POST, sends even an empty digest, and deduplicates', async () => {
     const { env, store, article, digest } = await setup();
-    await digest(); await article('high'); await article('boundary', .8); await article('low', .7);
+    await digest(now - 60000); await article('high', .9, 3600000); await article('boundary', .8); await article('low', .7);
     const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       const payload = JSON.parse(init!.body as string);
-      expect(await store.first('SELECT status FROM site_message_deliveries WHERE id=?', payload.externalId)).toEqual({ status: 'reserved' });
+      expect(await store.first('SELECT status,payload_json FROM site_message_deliveries WHERE id=?', payload.externalId)).toEqual({ status: 'reserved', payload_json: init!.body });
       expect(url).toBe('https://messages.falsita.cn/v1/messages');
       expect(init).toMatchObject({ redirect: 'manual', headers: { Authorization: 'Bearer test-producer-token' } });
       expect(JSON.stringify(payload)).not.toContain('PRIVATE');
@@ -51,10 +56,30 @@ describe('message center delivery (all HTTP mocked)', () => {
     });
     expect(await dispatchMessageCenter(env, { now, fetcher })).toBe(2);
     const payloads = fetcher.mock.calls.map(([, init]) => JSON.parse(init!.body as string));
-    expect(payloads[0]).toMatchObject({ type: 'news.daily-digest', body: '今日没有重要新闻', url: 'https://news.example.com/daily/2026-11-17' });
-    expect(payloads[1]).toMatchObject({ type: 'news.worth-reading', metadata: { worthReading: .9 } });
+    expect(payloads).toEqual([
+      { externalId: 'news-digest:v1:owner:2026-11-17', type: 'news.daily-digest', title: '新闻日报已生成',
+        body: '今日没有重要新闻', priority: 'normal', url: 'https://news.example.com/daily/2026-11-17',
+        metadata: { day: '2026-11-17' }, occurredAt: '2026-11-17T03:59:00.000Z' },
+      { externalId: 'news-worth-reading:v1:owner:high', type: 'news.worth-reading', title: 'News high',
+        body: '', priority: 'high', url: 'https://example.com/high',
+        metadata: { articleId: 'high', worthReading: .9 }, occurredAt: '2026-11-17T03:00:00.000Z' },
+    ]);
     expect(await dispatchMessageCenter(env, { now, fetcher })).toBe(0);
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it('formats new titles as single-line plain text and removes a repeated digest heading', async () => {
+    const { env, store, article, digest } = await setup();
+    await digest(); await article('high');
+    await store.run('UPDATE site_digests SET title=?,overview=?', '2026-11-17：芯片厂商\n公布新产品',
+      '2026-11-17：芯片厂商 公布新产品\r\n\r\n<b>新产品已发布。</b>\r\n详情见日报。');
+    await store.run('UPDATE site_news SET title=? WHERE id=?', `<b>发布</b>\u2028${'🚀'.repeat(61)}`, 'high');
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 201 }));
+    expect(await dispatchMessageCenter({ ...env, NEWS_PUBLIC_URL: undefined }, { now, fetcher })).toBe(2);
+    const [daily, news] = fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    expect(daily).toMatchObject({ title: '芯片厂商 公布新产品', body: '新产品已发布。\n详情见日报。' });
+    expect(daily).not.toHaveProperty('url');
+    expect(news.title).toBe(`发布 ${'🚀'.repeat(56)}…`);
+    expect(news.body).toBe('');
   });
   it('uses a strict configurable threshold without a daily news count limit', async () => {
     const { env, store, article, digest } = await setup();
@@ -94,6 +119,7 @@ describe('message center delivery (all HTTP mocked)', () => {
     const fetcher = vi.fn();
     expect(await dispatchMessageCenter(env, { now, fetcher })).toBe(0);
     expect(fetcher).not.toHaveBeenCalled();
+    expect(await store.first('SELECT status,payload_json FROM site_message_deliveries')).toEqual({ status: 'reserved', payload_json: '{}' });
   });
   it('is opt-in, validates secrets/targets/threshold and does not backfill or send stale news', async () => {
     const { env, article, digest } = await setup(); await digest(now - 86400000); await article('stale', .95, 86400001);
